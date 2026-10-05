@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "JavaObjectProxy.h"
+#include <cstdlib>
 #include "Context.h"
 #include "ExceptionThrowers.h"
 #include "JavaMethodProxy.h"
@@ -44,7 +45,7 @@ JavaObjectProxy::JavaObjectProxy(Context* c, JNIEnv* env, const char* name, jobj
 JavaObjectProxy::~JavaObjectProxy() {
   context->getEnv()->DeleteGlobalRef(javaThis);
   for (auto& f : functions) {
-    delete [] f.name;
+    std::free(const_cast<char*>(f.name));
   }
 }
 

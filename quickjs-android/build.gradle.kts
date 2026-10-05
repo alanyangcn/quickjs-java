@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "app.cash.quickjs"
-version = "0.9.2-16kb.1"
+version = "0.9.2-16kb.2"
 
 android {
   namespace = "app.cash.quickjs"

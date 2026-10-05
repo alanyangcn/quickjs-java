@@ -60,6 +60,7 @@ public:
   JSRuntime *jsRuntime;
   JSContext *jsContext;
   JSClassID jsClassId;
+  mutable JSClassID javaExceptionClassId;
   jclass booleanClass;
   jclass integerClass;
   jclass doubleClass;

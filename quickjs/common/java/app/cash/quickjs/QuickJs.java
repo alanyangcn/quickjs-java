@@ -20,6 +20,7 @@ import androidx.annotation.Nullable;
 import java.io.Closeable;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.util.LinkedHashMap;
 import java.util.logging.Logger;
@@ -97,6 +98,7 @@ public final class QuickJs implements Closeable {
     }
     LinkedHashMap<String, Method> methods = new LinkedHashMap<>();
     for (Method method : type.getMethods()) {
+      if (Modifier.isStatic(method.getModifiers())) continue;
       if (methods.put(method.getName(), method) != null) {
         throw new UnsupportedOperationException(method.getName() + " is overloaded in " + type);
       }
@@ -123,6 +125,7 @@ public final class QuickJs implements Closeable {
     }
     LinkedHashMap<String, Method> methods = new LinkedHashMap<>();
     for (Method method : type.getMethods()) {
+      if (Modifier.isStatic(method.getModifiers())) continue;
       if (methods.put(method.getName(), method) != null) {
         throw new UnsupportedOperationException(method.getName() + " is overloaded in " + type);
       }
@@ -137,9 +140,17 @@ public final class QuickJs implements Closeable {
         new InvocationHandler() {
           @Override
           public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            // If the method is a method from Object then defer to normal invocation.
             if (method.getDeclaringClass() == Object.class) {
-              return method.invoke(this, args);
+              switch (method.getName()) {
+                case "equals":
+                  return proxy == args[0];
+                case "hashCode":
+                  return System.identityHashCode(proxy);
+                case "toString":
+                  return toString();
+                default:
+                  throw new AssertionError("Unexpected Object method: " + method);
+              }
             }
             return call(context, instance, method, args);
           }

@@ -33,7 +33,7 @@ public final class QuickJsException extends RuntimeException {
    * native code.
    */
   private final static Pattern STACK_TRACE_PATTERN =
-      Pattern.compile("\\s*at ([^\\s]+) \\(([^\\s]+(?<!cpp))[:(\\d+)]?\\).*$");
+      Pattern.compile("\\s*at (\\S+) \\((.+?)(?::(\\d+))?\\)\\s*$");
 
   /** Java StackTraceElements require a class name.  We don't have one in JS, so use this. */
   private final static String STACK_TRACE_CLASS_NAME = "JavaScript";
@@ -85,7 +85,16 @@ public final class QuickJsException extends RuntimeException {
       // Nothing interesting on this line.
       return null;
     }
-    return new StackTraceElement(STACK_TRACE_CLASS_NAME, m.group(1), m.group(2),
-        m.groupCount() > 3 ? Integer.parseInt(m.group(3)) : -1);
+    String fileName = m.group(2);
+    if (fileName.equals("native") || fileName.endsWith(".cpp")) return null;
+    int lineNumber = -1;
+    if (m.group(3) != null) {
+      try {
+        lineNumber = Integer.parseInt(m.group(3));
+      } catch (NumberFormatException ignored) {
+        // A malformed script-provided stack must not hide the original exception.
+      }
+    }
+    return new StackTraceElement(STACK_TRACE_CLASS_NAME, m.group(1), fileName, lineNumber);
   }
 }

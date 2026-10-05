@@ -16,6 +16,8 @@
 #include "Context.h"
 #include <cstring>
 #include <memory>
+#include <limits>
+#include <new>
 #include <assert.h>
 #include "JavaObjectProxy.h"
 #include "JsObjectProxy.h"
@@ -37,6 +39,23 @@ std::string getName(JNIEnv* env, jobject javaClass) {
 }
 
 namespace {
+
+const char* const JAVA_EXCEPTION_CAUSE = "__quickjs_java_exception_cause__";
+
+struct JavaExceptionCause {
+  const Context* context;
+  jthrowable throwable;
+};
+
+void javaExceptionFinalize(JSRuntime* runtime, JSValue value) {
+  const auto context = static_cast<const Context*>(JS_GetRuntimeOpaque(runtime));
+  const auto cause = static_cast<JavaExceptionCause*>(
+      JS_GetOpaque(value, context->javaExceptionClassId));
+  if (cause) {
+    cause->context->getEnv()->DeleteGlobalRef(cause->throwable);
+    delete cause;
+  }
+}
 
 void jsFinalize(JSRuntime* jsRuntime, JSValue val) {
   auto context = reinterpret_cast<const Context*>(JS_GetRuntimeOpaque(jsRuntime));
@@ -60,7 +79,7 @@ struct JniThreadDetacher {
 
 Context::Context(JNIEnv* env)
     : jniVersion(env->GetVersion()), jsRuntime(JS_NewRuntime()),
-      jsContext(JS_NewContext(jsRuntime)), jsClassId(0),
+      jsContext(JS_NewContext(jsRuntime)), jsClassId(0), javaExceptionClassId(0),
       booleanClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Boolean")))),
       integerClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Integer")))),
       doubleClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Double")))),
@@ -328,8 +347,10 @@ Context::toJavaObject(JNIEnv* env, const JSValueConst& value, bool throwOnUnsupp
 
 jobject Context::eval(JNIEnv* env, jstring source, jstring file) {
   std::string sourceCodeString = toCppString(env, source);
+  if (env->ExceptionCheck()) return nullptr;
 
   const char* fileName = env->GetStringUTFChars(file, 0);
+  if (!fileName) return nullptr;
 
   JSValue evalValue = JS_Eval(jsContext, sourceCodeString.c_str(), sourceCodeString.length(), fileName, 0);
 
@@ -363,7 +384,8 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         }
         env->ReleaseDoubleArrayElements(static_cast<jdoubleArray>(v.l), elements, JNI_ABORT);
         if (env->ExceptionCheck()) {
-          c->throwJavaExceptionFromJs(env);
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
         }
         return result;
       };
@@ -378,7 +400,8 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         }
         env->ReleaseIntArrayElements(static_cast<jintArray>(v.l), elements, JNI_ABORT);
         if (env->ExceptionCheck()) {
-          c->throwJavaExceptionFromJs(env);
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
         }
         return result;
       };
@@ -393,7 +416,8 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         }
         env->ReleaseBooleanArrayElements(static_cast<jbooleanArray>(v.l), elements, JNI_ABORT);
         if (env->ExceptionCheck()) {
-          c->throwJavaExceptionFromJs(env);
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
         }
         return result;
       };
@@ -412,7 +436,8 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
           env->DeleteLocalRef(element.l);
         }
         if (env->ExceptionCheck()) {
-          c->throwJavaExceptionFromJs(env);
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
         }
         return result;
       };
@@ -423,7 +448,8 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
     return [](Context* c, JNIEnv* env, jvalue v) {
       if (!v.l) return JS_NULL;
       std::string string = c->toCppString(env, static_cast<jstring>(v.l));
-      auto jsString = JS_NewString(c->jsContext, string.c_str());
+      if (env->ExceptionCheck()) return JS_NULL;
+      auto jsString = JS_NewStringLen(c->jsContext, string.data(), string.size());
       return jsString;
     };
   } else if (typeName == "java.lang.Double" || (typeName == "double" && boxed)) {
@@ -459,7 +485,18 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
   } else if (typeName == "java.lang.Object") {
     return [](Context* c, JNIEnv* env, jvalue v) {
       if (!v.l) return JS_NULL;
-      return c->getJavaToJsConverter(env, env->GetObjectClass(v.l), true)(c, env, v);
+      const auto actualClass = env->GetObjectClass(v.l);
+      if (!actualClass) return JS_NULL;
+      if (env->IsSameObject(actualClass, c->objectClass)) {
+        env->DeleteLocalRef(actualClass);
+        throwJavaException(env, "java/lang/IllegalArgumentException",
+                           "Unsupported Java type java.lang.Object");
+        return JS_NULL;
+      }
+      const auto converter = c->getJavaToJsConverter(env, actualClass, true);
+      env->DeleteLocalRef(actualClass);
+      if (env->ExceptionCheck()) return JS_NULL;
+      return converter(c, env, v);
     };
   } else if (typeName == "void") {
     return [](Context*, JNIEnv* env, jvalue) {
@@ -790,35 +827,68 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
 }
 
 void Context::throwJsException(JNIEnv* env, const JSValue& value) const {
+  if (env->ExceptionCheck()) return;
   JSValue exceptionValue = JS_GetException(jsContext);
+  JSValue causeHolder = JS_UNDEFINED;
+  if (javaExceptionClassId && JS_IsObject(exceptionValue)) {
+    causeHolder = JS_GetPropertyStr(jsContext, exceptionValue, JAVA_EXCEPTION_CAUSE);
+    if (JS_IsException(causeHolder)) {
+      JS_FreeValue(jsContext, JS_GetException(jsContext));
+    }
+  }
+  const auto cause = javaExceptionClassId
+      ? static_cast<JavaExceptionCause*>(JS_GetOpaque(causeHolder, javaExceptionClassId))
+      : nullptr;
 
-  JSValue messageValue = JS_GetPropertyStr(jsContext, exceptionValue, "message");
-  JSValue stackValue = JS_GetPropertyStr(jsContext, exceptionValue, "stack");
+  JSValue messageValue = JS_UNDEFINED;
+  JSValue stackValue = JS_UNDEFINED;
+  if (JS_IsObject(exceptionValue)) {
+    messageValue = JS_GetPropertyStr(jsContext, exceptionValue, "message");
+    if (JS_IsException(messageValue)) {
+      JS_FreeValue(jsContext, JS_GetException(jsContext));
+      messageValue = JS_UNDEFINED;
+    }
+    stackValue = JS_GetPropertyStr(jsContext, exceptionValue, "stack");
+    if (JS_IsException(stackValue)) {
+      JS_FreeValue(jsContext, JS_GetException(jsContext));
+      stackValue = JS_UNDEFINED;
+    }
+  }
+  const auto releaseValues = [&] {
+    JS_FreeValue(jsContext, messageValue);
+    JS_FreeValue(jsContext, stackValue);
+    JS_FreeValue(jsContext, causeHolder);
+    JS_FreeValue(jsContext, exceptionValue);
+  };
 
   // If the JS does a `throw 2;`, there won't be a message property.
   jstring message = toJavaString(env,
                                  JS_IsUndefined(messageValue) ? exceptionValue : messageValue);
-  JS_FreeValue(jsContext, messageValue);
-
-  jstring stack = toJavaString(env, stackValue);
-  JS_FreeValue(jsContext, stackValue);
-  JS_FreeValue(jsContext, exceptionValue);
-
-  jthrowable cause = static_cast<jthrowable>(JS_GetContextOpaque(jsContext));
-  JS_SetContextOpaque(jsContext, nullptr);
+  if (env->ExceptionCheck()) {
+    releaseValues();
+    return;
+  }
+  jstring stack = JS_IsUndefined(stackValue) ? nullptr : toJavaString(env, stackValue);
+  if (env->ExceptionCheck()) {
+    env->DeleteLocalRef(message);
+    releaseValues();
+    return;
+  }
 
   jobject exception;
   if (cause) {
-    exception = env->NewLocalRef(cause);
-    env->DeleteGlobalRef(cause);
+    exception = env->NewLocalRef(cause->throwable);
 
     // add the JavaScript stack to this exception.
-    const jmethodID addJavaScriptStack =
+    if (exception && stack && !env->ExceptionCheck()) {
+      const jmethodID addJavaScriptStack =
         env->GetStaticMethodID(quickJsExceptionClass,
                                "addJavaScriptStack",
                                "(Ljava/lang/Throwable;Ljava/lang/String;)V");
-    env->CallStaticVoidMethod(quickJsExceptionClass, addJavaScriptStack, exception,
-                              stack);
+      if (addJavaScriptStack && !env->ExceptionCheck()) {
+        env->CallStaticVoidMethod(quickJsExceptionClass, addJavaScriptStack, exception, stack);
+      }
+    }
   } else {
     exception = env->NewObject(quickJsExceptionClass,
                                quickJsExceptionConstructor,
@@ -828,17 +898,56 @@ void Context::throwJsException(JNIEnv* env, const JSValue& value) const {
 
   env->DeleteLocalRef(stack);
   env->DeleteLocalRef(message);
-
-  env->Throw(static_cast<jthrowable>(exception));
+  releaseValues();
+  if (exception && !env->ExceptionCheck()) env->Throw(static_cast<jthrowable>(exception));
+  env->DeleteLocalRef(exception);
 }
 
 JSValue Context::throwJavaExceptionFromJs(JNIEnv* env) const {
   assert(env->ExceptionCheck()); // There must be something to throw.
-  assert(JS_GetContextOpaque(jsContext) == nullptr); // There can't be a pending thrown exception.
   auto exception = env->ExceptionOccurred();
   env->ExceptionClear();
-  JS_SetContextOpaque(jsContext, env->NewGlobalRef(exception));
-  return JS_ThrowInternalError(jsContext, "Java Exception");
+  if (!javaExceptionClassId) {
+    JS_NewClassID(&javaExceptionClassId);
+    JSClassDef definition = {};
+    definition.class_name = "QuickJsJavaExceptionCause";
+    definition.finalizer = javaExceptionFinalize;
+    if (JS_NewClass(jsRuntime, javaExceptionClassId, &definition) < 0) {
+      javaExceptionClassId = 0;
+      env->DeleteLocalRef(exception);
+      return JS_ThrowOutOfMemory(jsContext);
+    }
+  }
+
+  JS_ThrowInternalError(jsContext, "Java Exception");
+  auto error = JS_GetException(jsContext);
+  if (!JS_IsObject(error)) {
+    env->DeleteLocalRef(exception);
+    return JS_Throw(jsContext, error);
+  }
+  auto holder = JS_NewObjectClass(jsContext, javaExceptionClassId);
+  if (JS_IsException(holder)) {
+    env->DeleteLocalRef(exception);
+    JS_FreeValue(jsContext, error);
+    return JS_EXCEPTION;
+  }
+  auto globalCause = static_cast<jthrowable>(env->NewGlobalRef(exception));
+  env->DeleteLocalRef(exception);
+  auto cause = globalCause ? new(std::nothrow) JavaExceptionCause{this, globalCause} : nullptr;
+  if (!cause) {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteGlobalRef(globalCause);
+    JS_FreeValue(jsContext, holder);
+    JS_FreeValue(jsContext, error);
+    return JS_ThrowOutOfMemory(jsContext);
+  }
+  JS_SetOpaque(holder, cause);
+  // A non-enumerable, read-only holder follows this specific error's lifetime.
+  if (JS_DefinePropertyValueStr(jsContext, error, JAVA_EXCEPTION_CAUSE, holder, 0) < 0) {
+    JS_FreeValue(jsContext, error);
+    return JS_EXCEPTION;
+  }
+  return JS_Throw(jsContext, error);
 }
 
 JNIEnv* Context::getEnv() const {
@@ -891,8 +1000,13 @@ jclass Context::getGlobalRef(JNIEnv* env, jclass clazz) {
  */
 std::string Context::toCppString(JNIEnv* env, jstring string) const {
   const jbyteArray utf8BytesObject = static_cast<jbyteArray>(env->CallObjectMethod(string, stringGetBytes, stringUtf8));
+  if (!utf8BytesObject || env->ExceptionCheck()) return {};
   size_t utf8Length = env->GetArrayLength(utf8BytesObject);
   jbyte* utf8Bytes = env->GetByteArrayElements(utf8BytesObject, NULL);
+  if (!utf8Bytes) {
+    env->DeleteLocalRef(utf8BytesObject);
+    return {};
+  }
   std::string result = std::string(reinterpret_cast<char*>(utf8Bytes), utf8Length);
   env->ReleaseByteArrayElements(utf8BytesObject, utf8Bytes, JNI_ABORT);
   env->DeleteLocalRef(utf8BytesObject);
@@ -904,13 +1018,31 @@ std::string Context::toCppString(JNIEnv* env, jstring string) const {
  * contain non-ASCII characters because that function expects modified UTF-8.
  */
 jstring Context::toJavaString(JNIEnv* env, const JSValueConst& value) const {
-  const char* string = JS_ToCString(jsContext, value);
-  size_t utf8Length = strlen(string);
+  if (env->ExceptionCheck()) return nullptr;
+  size_t utf8Length = 0;
+  const char* string = JS_ToCStringLen(jsContext, &utf8Length, value);
+  if (!string) {
+    JS_FreeValue(jsContext, JS_GetException(jsContext));
+    throwJsExceptionFmt(env, this, "Failed to convert JavaScript value to string");
+    return nullptr;
+  }
+  if (utf8Length > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+    JS_FreeCString(jsContext, string);
+    throwJavaException(env, "java/lang/OutOfMemoryError", "JavaScript string exceeds Java array size");
+    return nullptr;
+  }
   jbyteArray utf8BytesObject = env->NewByteArray(utf8Length);
-  jbyte* utf8Bytes = env->GetByteArrayElements(utf8BytesObject, NULL);
-  std::copy(string, string + utf8Length, utf8Bytes);
-  env->ReleaseByteArrayElements(utf8BytesObject, utf8Bytes, JNI_COMMIT);
+  if (!utf8BytesObject) {
+    JS_FreeCString(jsContext, string);
+    return nullptr;
+  }
+  env->SetByteArrayRegion(utf8BytesObject, 0, utf8Length,
+                          reinterpret_cast<const jbyte*>(string));
   JS_FreeCString(jsContext, string);
+  if (env->ExceptionCheck()) {
+    env->DeleteLocalRef(utf8BytesObject);
+    return nullptr;
+  }
   jstring result = static_cast<jstring>(env->NewObject(stringClass, stringConstructor, utf8BytesObject, stringUtf8));
   env->DeleteLocalRef(utf8BytesObject);
   return result;

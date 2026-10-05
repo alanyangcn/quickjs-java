@@ -155,6 +155,10 @@ JavaMethodProxy::invoke(Context* context, jobject javaThis, int argc, JSValueCon
   }
 
   auto result = javaCaller(context, env, javaThis, args);
+  if (env->ExceptionCheck()) {
+    JS_FreeValue(context->jsContext, result);
+    result = context->throwJavaExceptionFromJs(env);
+  }
   env->PopLocalFrame(nullptr);
   return result;
 }

@@ -17,7 +17,7 @@ The original legacy Android/JVM build files remain available.
 ```sh
 cd quickjs-android
 ./gradlew assembleRelease
-# Optional: publish app.cash.quickjs:quickjs-android:0.9.2-16kb.1 locally.
+# Optional: publish app.cash.quickjs:quickjs-android:0.9.2-16kb.2 locally.
 ./gradlew publishReleasePublicationToMavenLocal
 ```
 
