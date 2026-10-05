@@ -1,5 +1,44 @@
 # QuickJS Java
 
+## Android 16 KB fork
+
+This fork preserves the `app.cash.quickjs` Java/JNI API and QuickJS engine from the
+2021-08-04 release of `app.cash.quickjs:quickjs-android:0.9.2` (upstream commit
+`a738129cc4aa99206c00ae49e9c5b15cb58ad880`). The upstream repository is now named
+`cashapp/zipline`; its current `0.9.2` tag refers to a different Zipline release.
+
+The native Android target links with `max-page-size=16384` and
+`common-page-size=16384`. The `android-16kb` standalone build uses NDK r28c,
+CMake 3.22.1, AGP 9.4.1 and Gradle 9.8.0, and statically links the C++ runtime.
+It builds all four original ABIs. This build requires JDK 17 or newer and Android
+SDK 37; its minimum Android version is API 21, the minimum supported by NDK r28.
+The original legacy Android/JVM build files remain available.
+
+```sh
+cd android-16kb
+./gradlew assembleRelease
+# Optional: publish app.cash.quickjs:quickjs-android:0.9.2-16kb.1 locally.
+./gradlew publishReleasePublicationToMavenLocal
+```
+
+The rebuilt AAR is `android-16kb/build/outputs/aar/quickjs-android-release.aar`.
+For reproducible source integration, add this fork as a Git submodule and use a
+Gradle composite build in the consuming project's `settings.gradle.kts`:
+
+```kotlin
+includeBuild("vendor/quickjs-java/android-16kb") {
+  dependencySubstitution {
+    substitute(module("app.cash.quickjs:quickjs-android")).using(project(":"))
+  }
+}
+```
+
+Check the rebuilt ELF LOAD segment alignments with NDK `llvm-readelf -lW` (the
+alignment must be at least `0x4000` for 64-bit ABIs), and check the consuming APK
+with Android Build Tools `zipalign -c -P 16 -v 4 app.apk`. These checks do not
+replace running the app on a device or emulator whose `adb shell getconf PAGE_SIZE`
+returns `16384`. See [Android's 16 KB page-size guide](https://developer.android.com/guide/practices/page-sizes).
+
 The [QuickJS embeddable JavaScript engine][qjs] packaged for Android and the JVM.
 
 _(Looking for [Duktape Android](#Duktape)?)_
