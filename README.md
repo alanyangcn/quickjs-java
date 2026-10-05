@@ -8,25 +8,25 @@ This fork preserves the `app.cash.quickjs` Java/JNI API and QuickJS engine from 
 `cashapp/zipline`; its current `0.9.2` tag refers to a different Zipline release.
 
 The native Android target links with `max-page-size=16384` and
-`common-page-size=16384`. The `android-16kb` standalone build uses NDK r28c,
+`common-page-size=16384`. The `quickjs-android` standalone build uses NDK r28c,
 CMake 3.22.1, AGP 9.4.1 and Gradle 9.8.0, and statically links the C++ runtime.
 It builds all four original ABIs. This build requires JDK 17 or newer and Android
 SDK 37; its minimum Android version is API 21, the minimum supported by NDK r28.
 The original legacy Android/JVM build files remain available.
 
 ```sh
-cd android-16kb
+cd quickjs-android
 ./gradlew assembleRelease
 # Optional: publish app.cash.quickjs:quickjs-android:0.9.2-16kb.1 locally.
 ./gradlew publishReleasePublicationToMavenLocal
 ```
 
-The rebuilt AAR is `android-16kb/build/outputs/aar/quickjs-android-release.aar`.
+The rebuilt AAR is `quickjs-android/build/outputs/aar/quickjs-android-release.aar`.
 For reproducible source integration, add this fork as a Git submodule and use a
 Gradle composite build in the consuming project's `settings.gradle.kts`:
 
 ```kotlin
-includeBuild("vendor/quickjs-java/android-16kb") {
+includeBuild("vendor/quickjs-java/quickjs-android") {
   dependencySubstitution {
     substitute(module("app.cash.quickjs:quickjs-android")).using(project(":"))
   }
