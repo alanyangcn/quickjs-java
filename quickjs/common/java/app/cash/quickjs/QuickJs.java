@@ -207,6 +207,7 @@ public final class QuickJs implements Closeable {
 
     Object proxy = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] { type },
         new InvocationHandler() {
+          @SuppressWarnings("ReferenceEquality") // Proxies are equal only to themselves.
           @Override
           public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             if (method.getDeclaringClass() == Object.class) {

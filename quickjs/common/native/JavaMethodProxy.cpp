@@ -19,45 +19,47 @@
 #include <vector>
 #include "Context.h"
 #include "ExceptionThrowers.h"
+#include "Scoped.h"
 
 JavaMethodProxy::JavaMethodProxy(Context* context, JNIEnv* env, jobject method)
     : name(getName(env, method)), isVarArgs(false) {
   auto methodId = env->FromReflectedMethod(method);
-  jclass methodClass = env->GetObjectClass(method);
+  ScopedLocalRef<jclass> methodClass(env, env->GetObjectClass(method));
 
   const jmethodID isVarArgsMethod =
-      env->ExceptionCheck() ? nullptr : env->GetMethodID(methodClass, "isVarArgs", "()Z");
+      env->ExceptionCheck() ? nullptr : env->GetMethodID(methodClass.get(), "isVarArgs", "()Z");
   if (isVarArgsMethod) {
     isVarArgs = env->CallBooleanMethod(method, isVarArgsMethod);
   }
 
   const jmethodID getParameterTypes = env->ExceptionCheck()
       ? nullptr
-      : env->GetMethodID(methodClass, "getParameterTypes", "()[Ljava/lang/Class;");
-  jobjectArray parameterTypes = getParameterTypes
+      : env->GetMethodID(methodClass.get(), "getParameterTypes", "()[Ljava/lang/Class;");
+  ScopedLocalRef<jobjectArray> parameterTypes(env, getParameterTypes
       ? static_cast<jobjectArray>(env->CallObjectMethod(method, getParameterTypes))
-      : nullptr;
+      : nullptr);
   if (parameterTypes && !env->ExceptionCheck()) {
-    const jsize numArgs = env->GetArrayLength(parameterTypes);
+    const jsize numArgs = env->GetArrayLength(parameterTypes.get());
     for (jsize i = 0; i < numArgs && !env->ExceptionCheck(); ++i) {
-      auto parameterType = env->GetObjectArrayElement(parameterTypes, i);
+      ScopedLocalRef<jclass> parameterType(
+          env, static_cast<jclass>(env->GetObjectArrayElement(parameterTypes.get(), i)));
       if (!parameterType) break;
-      argumentLoaders.push_back(
-          context->getJsToJavaConverter(env, static_cast<jclass>(parameterType), false));
-      env->DeleteLocalRef(parameterType);
+      argumentLoaders.push_back(context->getJsToJavaConverter(env, parameterType.get(), false));
     }
   }
 
   if (!env->ExceptionCheck()) {
     const jmethodID getReturnType =
-        env->GetMethodID(methodClass, "getReturnType", "()Ljava/lang/Class;");
-    auto returnTypeObject = getReturnType ? env->CallObjectMethod(method, getReturnType) : nullptr;
+        env->GetMethodID(methodClass.get(), "getReturnType", "()Ljava/lang/Class;");
+    ScopedLocalRef<jclass> returnType(env, getReturnType
+        ? static_cast<jclass>(env->CallObjectMethod(method, getReturnType))
+        : nullptr);
     auto resultLoader = env->ExceptionCheck()
         ? Context::JavaToJavaScript()
-        : context->getJavaToJsConverter(env, static_cast<jclass>(returnTypeObject), false);
+        : context->getJavaToJsConverter(env, returnType.get(), false);
 
     if (!env->ExceptionCheck()) {
-      auto returnTypeName = getName(env, returnTypeObject);
+      auto returnTypeName = getName(env, returnType.get());
       if (returnTypeName == "void") {
         javaCaller = [methodId, resultLoader](Context* context, JNIEnv* env, jobject javaThis,
                                               const jvalue* args) {
@@ -122,11 +124,7 @@ JavaMethodProxy::JavaMethodProxy(Context* context, JNIEnv* env, jobject method)
         };
       }
     }
-
-    env->DeleteLocalRef(returnTypeObject);
   }
-  env->DeleteLocalRef(parameterTypes);
-  env->DeleteLocalRef(methodClass);
 }
 
 JavaMethodProxy::~JavaMethodProxy() {
@@ -135,42 +133,38 @@ JavaMethodProxy::~JavaMethodProxy() {
 
 JSValue
 JavaMethodProxy::invoke(Context* context, jobject javaThis, int argc, JSValueConst* argv) const {
-  const auto minArgs = isVarArgs ? argumentLoaders.size() - 1 : argumentLoaders.size();
+  const int minArgs = static_cast<int>(argumentLoaders.size()) - (isVarArgs ? 1 : 0);
   if (minArgs > argc || (!isVarArgs && minArgs < argc)) {
     return JS_ThrowRangeError(context->jsContext, "Wrong number of arguments");
   }
 
   auto env = context->getEnv();
-  if (env->PushLocalFrame(argc + 1) < 0) {
-    return context->throwJavaExceptionFromJs(env);
-  }
-  std::vector<jvalue> args(argumentLoaders.size());
-  for (int i = 0; i < minArgs; i++) {
-    args[i] = argumentLoaders[i](context, env, argv[i]);
-    if (env->ExceptionCheck()) {
-      env->PopLocalFrame(nullptr);
-      return context->throwJavaExceptionFromJs(env);
+  JSValue result;
+  {
+    // Frees the local references made by converting the arguments and calling Java.
+    ScopedLocalFrame frame(env, argc + 1);
+    if (!frame.ok()) return context->throwJavaExceptionFromJs(env);
+    std::vector<jvalue> args(argumentLoaders.size());
+    for (int i = 0; i < minArgs; i++) {
+      args[i] = argumentLoaders[i](context, env, argv[i]);
+      if (env->ExceptionCheck()) break;
     }
-  }
-  if (isVarArgs) {
-    auto varArgs = JS_NewArray(context->jsContext);
-    for (int i = minArgs; i < argc; i++) {
-      JS_SetPropertyUint32(context->jsContext, varArgs, i - minArgs,
-                           JS_DupValue(context->jsContext, argv[i]));
+    if (isVarArgs && !env->ExceptionCheck()) {
+      // Collect the remaining arguments into an array for the Java varargs parameter.
+      JSValue varArgs = context->newArray(env, argc - minArgs, [&](size_t i) {
+        return JS_DupValue(context->jsContext, argv[minArgs + i]);
+      });
+      if (JS_IsException(varArgs)) return JS_EXCEPTION;
+      ScopedJSValue varArgsRef(context->jsContext, varArgs);
+      args[minArgs] = argumentLoaders.back()(context, env, varArgs);
     }
-    args[minArgs] = argumentLoaders.back()(context, env, varArgs);
-    JS_FreeValue(context->jsContext, varArgs);
-    if (env->ExceptionCheck()) {
-      env->PopLocalFrame(nullptr);
-      return context->throwJavaExceptionFromJs(env);
-    }
-  }
+    if (env->ExceptionCheck()) return context->throwJavaExceptionFromJs(env);
 
-  auto result = javaCaller(context, env, javaThis, args.data());
-  if (env->ExceptionCheck()) {
-    JS_FreeValue(context->jsContext, result);
-    result = context->throwJavaExceptionFromJs(env);
+    result = javaCaller(context, env, javaThis, args.data());
+    if (env->ExceptionCheck()) {
+      JS_FreeValue(context->jsContext, result);
+      result = context->throwJavaExceptionFromJs(env);
+    }
   }
-  env->PopLocalFrame(nullptr);
   return result;
 }

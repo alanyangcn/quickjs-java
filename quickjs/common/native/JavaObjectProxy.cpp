@@ -19,6 +19,7 @@
 #include "Context.h"
 #include "ExceptionThrowers.h"
 #include "JavaMethodProxy.h"
+#include "Scoped.h"
 
 JavaObjectProxy::JavaObjectProxy(Context* c, JNIEnv* env, const char* name, jobject object,
                                  jobjectArray methods, JSValueConst proxy)
@@ -27,12 +28,11 @@ JavaObjectProxy::JavaObjectProxy(Context* c, JNIEnv* env, const char* name, jobj
   functions.resize(numMethods);
   auto f = functions.data();
   for (int i = 0; i < numMethods && !env->ExceptionCheck(); i++) {
-    auto method = env->GetObjectArrayElement(methods, i);
+    ScopedLocalRef<jobject> method(env, env->GetObjectArrayElement(methods, i));
     if (env->ExceptionCheck()) {
       break;
     }
-    proxies.emplace_back(context, env, method);
-    env->DeleteLocalRef(method);
+    proxies.emplace_back(context, env, method.get());
     if (env->ExceptionCheck()) {
       break;
     }
@@ -70,7 +70,7 @@ JavaObjectProxy::~JavaObjectProxy() {
 
 JSValue
 JavaObjectProxy::call(int magic, int argc, JSValueConst* argv) const {
-  if (magic < proxies.size()) {
+  if (magic >= 0 && static_cast<size_t>(magic) < proxies.size()) {
     return proxies[magic].invoke(context, javaThis, argc, argv);
   } else {
     return JS_ThrowInternalError(context->jsContext, "Function not found");

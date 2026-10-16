@@ -18,6 +18,7 @@
 #include "Context.h"
 #include "ExceptionThrowers.h"
 #include "JsMethodProxy.h"
+#include "Scoped.h"
 
 JsObjectProxy::JsObjectProxy(Context* context, const std::string& name, JSAtom nameAtom)
     : name(name), nameAtom(nameAtom), context(context) {
@@ -44,16 +45,13 @@ jobject JsObjectProxy::call(Context *context, JNIEnv* env, jint methodIndex, job
     return nullptr;
   }
 
-  JSValue global = JS_GetGlobalObject(context->jsContext);
-  JSValue thisPointer = JS_GetProperty(context->jsContext, global, nameAtom);
-  JS_FreeValue(context->jsContext, global);
-  if (JS_IsException(thisPointer)) {
+  ScopedJSValue global(context->jsContext, JS_GetGlobalObject(context->jsContext));
+  ScopedJSValue thisPointer(context->jsContext,
+                            JS_GetProperty(context->jsContext, global.get(), nameAtom));
+  if (JS_IsException(thisPointer.get())) {
     // Report the getter's exception rather than failing later on an undefined receiver.
-    context->throwJsException(env, thisPointer);
+    context->throwJsException(env, thisPointer.get());
     return nullptr;
   }
-
-  jobject result = methods[methodIndex]->call(context, env, thisPointer, args);
-  JS_FreeValue(context->jsContext, thisPointer);
-  return result;
+  return methods[methodIndex]->call(context, env, thisPointer.get(), args);
 }

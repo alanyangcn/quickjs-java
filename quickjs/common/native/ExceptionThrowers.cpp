@@ -17,6 +17,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include "Context.h"
+#include "Scoped.h"
 
 namespace {
 
@@ -51,22 +52,17 @@ size_t formatMessage(char* msg, size_t size, const char* fmt, va_list args) {
  * garbles characters outside the BMP.
  */
 jstring newStringFromUtf8(JNIEnv* env, const char* utf8, size_t length) {
-  jbyteArray bytes = env->NewByteArray(length);
+  ScopedLocalRef<jbyteArray> bytes(env, env->NewByteArray(length));
   if (!bytes) return nullptr;
-  env->SetByteArrayRegion(bytes, 0, length, reinterpret_cast<const jbyte*>(utf8));
-  jclass stringClass = env->FindClass("java/lang/String");
-  jstring charsetName = stringClass ? env->NewStringUTF("UTF-8") : nullptr;
-  jstring result = nullptr;
-  if (charsetName) {
-    jmethodID constructor = env->GetMethodID(stringClass, "<init>", "([BLjava/lang/String;)V");
-    if (constructor) {
-      result = static_cast<jstring>(env->NewObject(stringClass, constructor, bytes, charsetName));
-    }
-  }
-  env->DeleteLocalRef(charsetName);
-  env->DeleteLocalRef(stringClass);
-  env->DeleteLocalRef(bytes);
-  return result;
+  env->SetByteArrayRegion(bytes.get(), 0, length, reinterpret_cast<const jbyte*>(utf8));
+  ScopedLocalRef<jclass> stringClass(env, env->FindClass("java/lang/String"));
+  if (!stringClass) return nullptr;
+  ScopedLocalRef<jstring> charsetName(env, env->NewStringUTF("UTF-8"));
+  if (!charsetName) return nullptr;
+  jmethodID constructor = env->GetMethodID(stringClass.get(), "<init>", "([BLjava/lang/String;)V");
+  if (!constructor) return nullptr;
+  return static_cast<jstring>(
+      env->NewObject(stringClass.get(), constructor, bytes.get(), charsetName.get()));
 }
 
 } // anonymous namespace
@@ -78,17 +74,15 @@ void throwJavaException(JNIEnv *env, const char *exceptionClass, const char *fmt
   va_start (args, fmt);
   const size_t length = formatMessage(msg, sizeof(msg), fmt, args);
   va_end (args);
-  jclass clazz = env->FindClass(exceptionClass);
+  ScopedLocalRef<jclass> clazz(env, env->FindClass(exceptionClass));
   if (!clazz) return;
-  jstring message = newStringFromUtf8(env, msg, length);
-  jmethodID constructor = message
-      ? env->GetMethodID(clazz, "<init>", "(Ljava/lang/String;)V")
-      : nullptr;
-  jobject exception = constructor ? env->NewObject(clazz, constructor, message) : nullptr;
-  if (exception) env->Throw(static_cast<jthrowable>(exception));
-  env->DeleteLocalRef(exception);
-  env->DeleteLocalRef(message);
-  env->DeleteLocalRef(clazz);
+  ScopedLocalRef<jstring> message(env, newStringFromUtf8(env, msg, length));
+  if (!message) return;
+  jmethodID constructor = env->GetMethodID(clazz.get(), "<init>", "(Ljava/lang/String;)V");
+  if (!constructor) return;
+  ScopedLocalRef<jthrowable> exception(
+      env, static_cast<jthrowable>(env->NewObject(clazz.get(), constructor, message.get())));
+  if (exception) env->Throw(exception.get());
 }
 
 void throwJsExceptionFmt(JNIEnv *env, const Context *context, const char *fmt, ...) {
@@ -98,13 +92,10 @@ void throwJsExceptionFmt(JNIEnv *env, const Context *context, const char *fmt, .
   va_start (args, fmt);
   const size_t length = formatMessage(msg, sizeof(msg), fmt, args);
   va_end (args);
-  jstring message = newStringFromUtf8(env, msg, length);
+  ScopedLocalRef<jstring> message(env, newStringFromUtf8(env, msg, length));
   if (!message) return;
-  jobject exception = env->NewObject(context->quickJsExceptionClass,
-                                     context->quickJsExceptionConstructor,
-                                     message,
-                                     NULL);
-  if (exception) env->Throw(static_cast<jthrowable>(exception));
-  env->DeleteLocalRef(exception);
-  env->DeleteLocalRef(message);
+  ScopedLocalRef<jthrowable> exception(env, static_cast<jthrowable>(env->NewObject(
+      context->quickJsExceptionClass, context->quickJsExceptionConstructor, message.get(),
+      nullptr)));
+  if (exception) env->Throw(exception.get());
 }

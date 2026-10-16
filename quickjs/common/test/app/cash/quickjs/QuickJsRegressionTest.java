@@ -243,6 +243,30 @@ public final class QuickJsRegressionTest {
     assertThat(quickjs.evaluate("1 + 1")).isEqualTo(2);
   }
 
+  // U3: bytecode that compile() didn't produce fails cleanly.
+
+  @Test public void malformedBytecodeThrows() throws Exception {
+    runIsolated("malformedBytecodeThrows");
+  }
+
+  static void malformedBytecodeThrowsScenario(QuickJs quickjs) {
+    byte[] bytecode = quickjs.compile("var answer = 6 * 7; answer", "test.js");
+    byte[][] inputs = {
+        new byte[0],
+        new byte[] {1, 2, 3},
+        java.util.Arrays.copyOf(bytecode, bytecode.length / 2),
+        java.util.Arrays.copyOf(bytecode, bytecode.length - 1),
+    };
+    for (byte[] input : inputs) {
+      try {
+        quickjs.execute(input);
+        fail();
+      } catch (QuickJsException expected) {
+      }
+    }
+    assertThat(quickjs.execute(bytecode)).isEqualTo(42);
+  }
+
   // R04: failed Java to JavaScript argument conversion must not call the JavaScript function.
 
   interface Sorter {
@@ -831,6 +855,91 @@ public final class QuickJsRegressionTest {
         assertThat(e).hasMessageThat().isEqualTo("Unsupported Java type java.util.Date");
       }
     }
+  }
+
+  // U4: stress the JNI bridge. Run with CheckJNI (the JVM tests and Android emulators do), these
+  // catch local reference leaks and missing exception checks.
+
+  interface Arrays {
+    int[] ints(int[] values);
+    double[] doubles(double[] values);
+    String[] strings(String[] values);
+    Object[] objects(Object[] values);
+  }
+
+  @Test public void largeArraysInBothDirections() {
+    quickjs.set("javaArrays", Arrays.class, new Arrays() {
+      @Override public int[] ints(int[] values) {
+        return values;
+      }
+
+      @Override public double[] doubles(double[] values) {
+        return values;
+      }
+
+      @Override public String[] strings(String[] values) {
+        return values;
+      }
+
+      @Override public Object[] objects(Object[] values) {
+        return values;
+      }
+    });
+    quickjs.evaluate(""
+        + "var jsArrays = {\n"
+        + "  ints: function(v) { return javaArrays.ints(v); },\n"
+        + "  doubles: function(v) { return javaArrays.doubles(v); },\n"
+        + "  strings: function(v) { return javaArrays.strings(v); },\n"
+        + "  objects: function(v) { return javaArrays.objects(v); }\n"
+        + "};");
+    Arrays arrays = quickjs.get("jsArrays", Arrays.class);
+
+    int size = 50000;
+    int[] ints = new int[size];
+    double[] doubles = new double[size];
+    String[] strings = new String[size];
+    Object[] objects = new Object[size];
+    for (int i = 0; i < size; i++) {
+      ints[i] = i;
+      doubles[i] = i + 0.5;
+      strings[i] = "s" + i;
+      objects[i] = i % 2 == 0 ? (Object) i : (Object) ("o" + i);
+    }
+    assertThat(arrays.ints(ints)).isEqualTo(ints);
+    assertThat(arrays.doubles(doubles)).isEqualTo(doubles);
+    assertThat(arrays.strings(strings)).isEqualTo(strings);
+    assertThat(arrays.objects(objects)).isEqualTo(objects);
+  }
+
+  interface Counter {
+    Object next(Object previous, String label);
+  }
+
+  @Test public void manyCalls() {
+    quickjs.evaluate("var counter = { next: function(p, label) { return p + 1; } };");
+    Counter counter = quickjs.get("counter", Counter.class);
+    Object value = 0;
+    for (int i = 0; i < 20000; i++) {
+      value = counter.next(value, "call " + i);
+    }
+    assertThat(value).isEqualTo(20000);
+  }
+
+  interface Bouncer {
+    int bounce(int depth);
+  }
+
+  @Test public void deepCallbacksBetweenJavaAndJavaScript() {
+    final Bouncer[] javaScript = new Bouncer[1];
+    quickjs.set("java", Bouncer.class, new Bouncer() {
+      @Override public int bounce(int depth) {
+        return depth == 0 ? 0 : 1 + javaScript[0].bounce(depth - 1);
+      }
+    });
+    quickjs.evaluate(
+        "var js = { bounce: function(d) { return d == 0 ? 0 : 1 + java.bounce(d - 1); } };");
+    javaScript[0] = quickjs.get("js", Bouncer.class);
+    assertThat(javaScript[0].bounce(20)).isEqualTo(20);
   }
 
   private static void assertConversionFails(String message, Runnable runnable) {

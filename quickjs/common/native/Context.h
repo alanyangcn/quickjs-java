@@ -53,6 +53,16 @@ public:
   jobject toJavaObject(JNIEnv*, const JSValue& value, bool throwOnUnsupportedType = true);
   // Reads the length of an array-like value. On failure throws a Java exception, returns false.
   bool getArrayLength(JNIEnv*, const JSValueConst& value, jsize* length) const;
+  // Returns a new JavaScript array of `length` values from `element`, which may fail by returning
+  // JS_EXCEPTION or with a pending Java exception. On failure returns JS_EXCEPTION, with the cause
+  // pending in JavaScript.
+  JSValue newArray(JNIEnv*, size_t length, const std::function<JSValue(size_t)>& element);
+  // Converts the array-like `value` to a Java array made by `newArray` and filled by `setElement`,
+  // which throws a Java exception on failure. null and undefined become null.
+  template <typename ArrayType>
+  jvalue toJavaArray(JNIEnv*, const JSValueConst& value,
+                     const std::function<ArrayType(jsize)>& newArray,
+                     const std::function<void(ArrayType, jsize, JSValueConst)>& setElement);
   void throwJsException(JNIEnv*, const JSValue& value) const;
   JSValue throwJavaExceptionFromJs(JNIEnv*) const;
 
