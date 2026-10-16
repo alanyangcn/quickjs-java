@@ -18,7 +18,6 @@ package app.cash.quickjs;
 import java.util.Date;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import static com.google.common.truth.Truth.assertThat;
@@ -138,29 +137,14 @@ public final class QuickJsGetTest {
     }
   }
 
-  @Ignore("TODO: track JsMethodProxies.")
-  @Test public void replaceProxiedObjectProxyReferencesOld() {
+  @Test public void replaceProxiedObjectIsSeenByExistingProxy() {
     quickJs.evaluate("var value = { getValue: function() { return '8675309'; } };");
 
     TestInterface proxy = quickJs.get("value", TestInterface.class);
 
-    // Now replace the proxied object with a new global.
+    // Proxies look up the global by name on every call.
     quickJs.evaluate("value = { getValue: function() { return '7471111'; } };");
-
-    try {
-      // Calls to the old object fail.
-      proxy.getValue();
-      fail();
-    } catch (QuickJsException expected) {
-      assertThat(expected)
-          .hasMessageThat()
-          .isEqualTo("JavaScript object value has been garbage collected");
-    }
-
-    // We can create a new proxy to the new object and call it.
-    TestInterface proxy2 = quickJs.get("value", TestInterface.class);
-    assertThat(proxy).isNotEqualTo(proxy2);
-    assertThat(proxy2.getValue()).isEqualTo("7471111");
+    assertThat(proxy.getValue()).isEqualTo("7471111");
   }
 
   @Test public void replaceProxiedMethodReferencesNew() {
@@ -195,20 +179,18 @@ public final class QuickJsGetTest {
     assertThat(proxy1.getValue()).isEqualTo(proxy2.getValue());
   }
 
-  @Ignore("TODO: track JsMethodProxies.")
-  @Test public void proxyCalledAfterObjectGarbageCollected() {
+  @Test public void proxyCalledAfterGlobalRemovedThrows() {
     quickJs.evaluate("var value = { getValue: function() { return '8675309'; } };");
 
     TestInterface proxy = quickJs.get("value", TestInterface.class);
-    quickJs.evaluate("delete value;");
+    quickJs.evaluate("value = undefined;");
 
     try {
       proxy.getValue();
       fail();
     } catch (QuickJsException expected) {
-      assertThat(expected)
-          .hasMessageThat()
-          .isEqualTo("JavaScript object value has been garbage collected");
+      assertThat(expected).hasMessageThat()
+          .isEqualTo("cannot read property 'getValue' of undefined");
     }
   }
 

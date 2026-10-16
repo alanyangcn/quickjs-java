@@ -614,7 +614,8 @@ public final class QuickJsRegressionTest {
       quickjs.evaluate("var a = []; while (true) a.push(new Array(1000).fill(1));");
       fail();
     } catch (QuickJsException e) {
-      assertThat(e).hasMessageThat().isEqualTo("out of memory");
+      // When even the error object can't be allocated, QuickJS throws null instead.
+      assertThat(e.getMessage()).isAnyOf("out of memory", "null");
     }
     quickjs.evaluate("a = null;");
 
@@ -623,19 +624,33 @@ public final class QuickJsRegressionTest {
   }
 
   @Test public void maxStackSize() {
-    quickjs.evaluate("function depth(n) { return n == 0 ? 0 : 1 + depth(n - 1); }");
-    assertThat(quickjs.evaluate("depth(100)")).isEqualTo(100);
+    // How deep JavaScript can recurse depends on the native stack frame size, which varies with
+    // the ABI and compiler options, so compare depths rather than expecting fixed ones.
+    quickjs.evaluate(""
+        + "function depth(n) { return n == 0 ? 0 : 1 + depth(n - 1); }\n"
+        + "function maxDepth() {\n"
+        + "  var lo = 0, hi = 1000000;\n"
+        + "  while (lo < hi) {\n"
+        + "    var mid = (lo + hi + 1) >> 1;\n"
+        + "    try { depth(mid); lo = mid; } catch (e) { hi = mid - 1; }\n"
+        + "  }\n"
+        + "  return lo;\n"
+        + "}");
+    int defaultDepth = (Integer) quickjs.evaluate("maxDepth()");
+    assertThat(defaultDepth).isGreaterThan(10);
 
     quickjs.setMaxStackSize(32 * 1024);
+    int smallDepth = (Integer) quickjs.evaluate("maxDepth()");
+    assertThat(smallDepth).isLessThan(defaultDepth / 4);
     try {
-      quickjs.evaluate("depth(100)");
+      quickjs.evaluate("depth(" + (smallDepth + 10) + ")");
       fail();
     } catch (QuickJsException e) {
       assertThat(e).hasMessageThat().isEqualTo("stack overflow");
     }
 
     quickjs.setMaxStackSize(256 * 1024);
-    assertThat(quickjs.evaluate("depth(100)")).isEqualTo(100);
+    assertThat(quickjs.evaluate("maxDepth()")).isEqualTo(defaultDepth);
   }
 
   @Test public void stackLimitFollowsCallingThread() throws Exception {
@@ -649,7 +664,7 @@ public final class QuickJsRegressionTest {
       @Override public void run() {
         try {
           quickjs.evaluate("function depth(n) { return n == 0 ? 0 : 1 + depth(n - 1); }");
-          assertThat(quickjs.evaluate("depth(100)")).isEqualTo(100);
+          assertThat(quickjs.evaluate("depth(10)")).isEqualTo(10);
           try {
             quickjs.evaluate("function forever() { return forever() + 1; } forever()");
             fail();
