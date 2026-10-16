@@ -1,6 +1,6 @@
 # Releasing
 
-Releases are tagged with the version, such as `0.9.2-16kb.3`. Pushing a tag that matches
+Releases are tagged with the version, such as `0.10.0-16kb.1`. Pushing a tag that matches
 `*-16kb.*` starts the `release` workflow, which builds and checks everything and creates a draft
 GitHub release.
 

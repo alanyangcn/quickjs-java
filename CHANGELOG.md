@@ -3,7 +3,31 @@
 ## [Unreleased]
 
 Changes in this fork since upstream 0.9.2. Earlier builds of the fork were versioned
-`0.9.2-16kb.1` and `0.9.2-16kb.2` but not tagged.
+`0.9.2-16kb.1` and `0.9.2-16kb.2` but not tagged. This release is `0.10.0-16kb.1` because it
+changes behavior that callers may rely on.
+
+### Breaking changes
+
+* **Bytecode.** QuickJS is updated to 2026-06-04, so bytecode from `compile()` with earlier versions
+  can't be executed. Compile your scripts again with this version.
+* **Strict conversions.** `int` and `Integer` accept only numbers that are exactly an int, and
+  `boolean` and `Boolean` only booleans, in arguments, return values and arrays alike. Values such
+  as `'1'`, `1.5` or `1` (for a boolean) now throw `IllegalArgumentException` instead of being
+  converted. Convert them in JavaScript, or use `double`, `String` or `Object`.
+* **Primitive return values.** A proxy method returning `int`, `double` or `boolean` throws
+  `IllegalArgumentException` when JavaScript returns `null` or `undefined`. Use `Integer`,
+  `Double` or `Boolean` if JavaScript may return nothing.
+* **`close()` while executing.** Calling `close()` from a Java method that JavaScript is calling
+  throws `IllegalStateException`. Close the instance after the outermost call returns.
+* **`evaluate()` results.** Values with no Java representation become `null` at any depth;
+  `evaluate("[{}]")` returns `[null]` instead of throwing.
+* **Limits.** Arrays passed between Java and JavaScript may have at most 4,194,304 elements in
+  total and be nested at most 256 deep.
+* **Native frames.** Stack traces no longer include QuickJS's own frames for native functions.
+* **R8 and ProGuard.** Interfaces passed to `set()` and `get()` need `@Keep` in shrunk apps; see
+  the README. This was already necessary, but it is now documented and tested.
+* **JVM resources.** The JVM JAR stores its native libraries under `<os>-<arch>/`. This only
+  matters if you build the JAR yourself.
 
 ### Added
 

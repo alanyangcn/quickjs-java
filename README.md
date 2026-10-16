@@ -198,7 +198,7 @@ Then depend on it as usual:
 
 ```kotlin
 dependencies {
-  implementation("app.cash.quickjs:quickjs-android:0.9.2-16kb.3-SNAPSHOT")
+  implementation("app.cash.quickjs:quickjs-android:0.10.0-16kb.1-SNAPSHOT")
 }
 ```
 
@@ -223,7 +223,7 @@ Download `quickjs-android-<version>.aar` from a [release][releases], or build it
 
 ```kotlin
 dependencies {
-  implementation(files("libs/quickjs-android-0.9.2-16kb.3.aar"))
+  implementation(files("libs/quickjs-android-0.10.0-16kb.1.aar"))
   implementation("androidx.annotation:annotation:1.1.0")
 }
 ```
