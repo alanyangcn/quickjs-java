@@ -168,7 +168,13 @@ engine.setInterruptHandler(new QuickJs.InterruptHandler() {
 
 Exceeding a limit throws `QuickJsException` (`out of memory`, `stack overflow`). The interrupt
 handler is polled on the thread running JavaScript; when it returns `true`, the script stops with a
-`QuickJsException` (`interrupted`) that JavaScript can't catch.
+`QuickJsException` (`interrupted`) that JavaScript can't catch. QuickJS polls it about every 10,000
+bytecode instructions, a fixed interval: keep `poll()` cheap, and expect a single long-running
+built-in operation, such as a regular expression on a huge string, to finish before it is
+interrupted.
+
+The limits on arrays passed between Java and JavaScript (4,194,304 elements in total, 256 levels of
+nesting) are fixed.
 
 
 ## Using this fork
@@ -295,8 +301,8 @@ The JAR is in `quickjs/jvm/build/libs/`. It includes the native libraries found 
 ## History
 
 Upstream released `app.cash.quickjs:quickjs-android` and `quickjs-jvm` up to 0.9.2 on Maven
-Central. Those versions don't support 16 KB pages and lack this fork's fixes. The original
-`quickjs/android` module and the `sample-octane` app are no longer built.
+Central. Those versions don't support 16 KB pages and lack this fork's fixes. This fork replaced
+the original `quickjs/android` module with `quickjs-android/` and removed the `sample-octane` app.
 
 This repository used to host an Android packaging of the [Duktape](https://duktape.org/) engine.
 Its history and release tags are still present, and its versions are listed on

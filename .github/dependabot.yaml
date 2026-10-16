@@ -1,7 +1,18 @@
 version: 2
 
 updates:
+  # Actions are pinned to commit SHAs; Dependabot updates the SHA and the version comment.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "gradle"
+    directory: "/quickjs-android"
+    schedule:
+      interval: "weekly"

@@ -1,6 +1,9 @@
+import net.ltgt.gradle.errorprone.CheckSeverity
+
 plugins {
   id 'java-library'
   id 'maven-publish'
+  id 'net.ltgt.errorprone' version '5.1.1'
 }
 
 group = GROUP
@@ -16,6 +19,21 @@ tasks.withType(JavaCompile).configureEach {
   options.release = 8
   // Building for Java 8 with a newer JDK warns that the release is obsolete.
   options.compilerArgs += ['-Xlint:-options']
+  options.errorprone {
+    check('MissingFail', CheckSeverity.ERROR)
+    check('MissingOverride', CheckSeverity.ERROR)
+    check('UnusedException', CheckSeverity.ERROR)
+    check('UnusedMethod', CheckSeverity.ERROR)
+    check('UnusedNestedClass', CheckSeverity.ERROR)
+    check('UnusedVariable', CheckSeverity.ERROR)
+  }
+}
+
+tasks.named('compileTestJava', JavaCompile) {
+  options.errorprone {
+    // Tests pass java.util.Date as an unsupported type, expect exceptions, and target Java 8.
+    disable('JavaUtilDate', 'EmptyCatch', 'JdkObsolete', 'AnnotateFormatMethod')
+  }
 }
 
 tasks.withType(Javadoc).configureEach {
@@ -29,6 +47,8 @@ sourceSets {
 
 dependencies {
   api deps.androidx.annotation
+
+  errorprone 'com.google.errorprone:error_prone_core:2.50.0'
 
   testImplementation deps.junit
   testImplementation deps.truth
@@ -56,6 +76,18 @@ tasks.named('test', Test) {
   doFirst {
     vmLog.get().asFile.parentFile.mkdirs()
     vmLog.get().asFile.delete()
+  }
+
+  // With -PsanitizerRuntime=<path to the ASan runtime>, test a native library built with
+  // AddressSanitizer and UndefinedBehaviorSanitizer (see the jvm-sanitizers CI job). The JVM uses
+  // signals that ASan must leave alone, and its own allocations aren't leaks.
+  def sanitizerRuntime = findProperty('sanitizerRuntime')
+  if (sanitizerRuntime) {
+    environment 'LD_PRELOAD', sanitizerRuntime
+    environment 'ASAN_OPTIONS',
+        'handle_segv=0:handle_sigbus=0:handle_sigfpe=0:handle_sigill=0:allow_user_segv_handler=1:' +
+        'detect_leaks=0:use_sigaltstack=0:abort_on_error=1'
+    environment 'UBSAN_OPTIONS', 'print_stacktrace=1:halt_on_error=1'
   }
   doLast {
     def log = vmLog.get().asFile

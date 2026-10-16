@@ -38,7 +38,7 @@ android {
 
   externalNativeBuild {
     cmake {
-      path = file("../quickjs/android/CMakeLists.txt")
+      path = file("CMakeLists.txt")
       version = "3.22.1"
     }
   }
@@ -66,7 +66,6 @@ android {
 androidComponents {
   onVariants { variant ->
     variant.sources.java?.addStaticSourceDirectory("../quickjs/common/java")
-    variant.sources.java?.addStaticSourceDirectory("../quickjs/android/src/main/java")
     // The same tests that run on the JVM, as instrumentation tests.
     variant.androidTest?.sources?.java?.addStaticSourceDirectory("../quickjs/common/test")
   }
@@ -75,9 +74,9 @@ androidComponents {
 dependencies {
   api("androidx.annotation:annotation:1.1.0")
 
-  androidTestImplementation("androidx.test:runner:1.6.2")
+  androidTestImplementation("androidx.test:runner:1.7.0")
   androidTestImplementation("junit:junit:4.13.2")
-  androidTestImplementation("com.google.truth:truth:1.0")
+  androidTestImplementation("com.google.truth:truth:1.4.5")
 }
 
 // Every native library must load on devices with 16 KB pages.

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+* `execute()` rejects module bytecode with `IllegalArgumentException`. `compile()` never produced
+  it, and modules need a module loader and asynchronous evaluation that this API doesn't offer.
+* The unbuilt `quickjs/android` module, the `sample-octane` app and `update_octane.sh` are removed.
+  `quickjs-android/` now holds the Android CMake build and native library loader.
+* The JVM build checks Java code with Error Prone, and the bridge's C++ is compiled with `-Wall
+  -Wextra` (warnings are errors with Clang).
+* CI also runs the JVM tests against a native library built with AddressSanitizer and
+  UndefinedBehaviorSanitizer. GitHub Actions are pinned to commit SHAs.
+
+### Fixed
+
+* Converting arrays between Java and JavaScript reports allocation failures instead of returning a
+  partial array with a JavaScript exception left pending.
+
 
 ## [0.10.0-16kb.1] - 2026-10-16
 

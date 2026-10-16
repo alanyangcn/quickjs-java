@@ -30,9 +30,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: gradle/actions/wrapper-validation@v6
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: 'temurin'
           java-version: 21
@@ -43,24 +43,51 @@ jobs:
       # Runs the tests against this platform's library, with CheckJNI.
       - run: ./gradlew :quickjs:jvm:build
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: jvm-native-${{ matrix.platform }}
           path: quickjs/jvm/src/main/resources/
           if-no-files-found: error
+
+  # Runs the JVM tests against a native library built with AddressSanitizer and
+  # UndefinedBehaviorSanitizer. Undefined behavior in the bridge fails the tests. QuickJS itself
+  # shifts negative numbers by design, so its C code is checked for everything else.
+  jvm-sanitizers:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: 'temurin'
+          java-version: 21
+
+      - name: Build native library with sanitizers
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          scripts/build-jvm-native.sh \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize=shift -fno-omit-frame-pointer" \
+            "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" \
+            "-DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=address,undefined -shared-libasan"
+
+      - run: ./gradlew :quickjs:jvm:test -PsanitizerRuntime="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
 
   jvm:
     runs-on: ubuntu-24.04
     needs: jvm-native
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: 'temurin'
           java-version: 21
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: jvm-native-*
           path: quickjs/jvm/src/main/resources/
@@ -78,7 +105,7 @@ jobs:
           cp quickjs/jvm/build/publications/maven/pom-default.xml \
             "quickjs/jvm/build/libs/$(basename "$jar" .jar).pom"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: quickjs-jvm
           path: quickjs/jvm/build/libs/
@@ -88,9 +115,9 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: gradle/actions/wrapper-validation@v6
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: 'temurin'
           java-version: 21
@@ -111,7 +138,7 @@ jobs:
           cp quickjs-android/build/publications/release/pom-default.xml \
             "build/android/quickjs-android-$version.pom"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: quickjs-android
           path: build/android/
@@ -134,8 +161,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: 'temurin'
           java-version: 21
@@ -146,7 +173,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - uses: reactivecircus/android-emulator-runner@v2
+      - uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: ${{ matrix.api-level }}
           target: ${{ matrix.target }}
@@ -164,7 +191,7 @@ jobs:
           scripts/print-test-failures.py quickjs-android/build/outputs/androidTest-results || true
           scripts/print-test-failures.py quickjs-android/minify-test/build/outputs/androidTest-results || true
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: android-test-results-${{ matrix.api-level }}

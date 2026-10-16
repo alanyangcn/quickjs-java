@@ -27,6 +27,15 @@ target_compile_definitions(quickjs PUBLIC CONFIG_VERSION="${QUICKJS_VERSION}")
 # QuickJS uses GNU extensions such as malloc_usable_size().
 target_compile_definitions(quickjs PRIVATE _GNU_SOURCE)
 
+# Warnings for the bridge, but not for QuickJS's own sources. They are errors with Clang, which
+# builds for Android and macOS; newer GCC versions may add warnings, so they stay warnings there.
+file(GLOB bridge_sources "../common/native/*.cpp")
+set(bridge_warnings -Wall -Wextra -Wno-unused-parameter)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  list(APPEND bridge_warnings -Werror)
+endif()
+set_source_files_properties(${bridge_sources} PROPERTIES COMPILE_OPTIONS "${bridge_warnings}")
+
 if(NOT APPLE)
   # Don't depend on the build machine's C++ runtime.
   target_link_options(quickjs PRIVATE -static-libstdc++ -static-libgcc)
