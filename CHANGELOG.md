@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+Changes in this fork since upstream 0.9.2. Earlier builds of the fork were versioned
+`0.9.2-16kb.1` and `0.9.2-16kb.2` but not tagged.
+
+### Added
+
+* Android: native libraries load on devices with 16 KB pages (every ELF LOAD segment is aligned to
+  16 KB). The build fails if they aren't.
+* Android: a standalone build in `quickjs-android/` (NDK r28c, AGP 9.4.1, Gradle 9.8.0) with all
+  four ABIs and a statically linked C++ runtime. The minimum Android version is now API 21.
+* Android: the shared tests run as instrumentation tests, including on a 16 KB emulator in CI.
+* JVM: native libraries for Linux and macOS on both x86_64 and arm64.
+* `executePendingJobs(maxJobs)` runs pending jobs such as `Promise` reactions.
+* `setMemoryLimit()`, `setMaxStackSize()` and `setInterruptHandler()` limit and stop scripts.
+* `scripts/check-elf-alignment.sh` checks AARs and APKs for 16 KB page support.
+
+### Changed
+
+* Numbers and booleans convert by the same strict rules everywhere: `int` and `Integer` accept only
+  numbers that are exactly an int, `boolean` and `Boolean` only booleans. Previously some
+  directions converted `'abc'` to `0` or used truthiness.
+* A proxy method returning `int`, `double` or `boolean` throws `IllegalArgumentException` when
+  JavaScript returns `null` or `undefined`, instead of a `NullPointerException`.
+* `evaluate()` and `execute()` return `null` for unsupported values at any depth; previously they
+  threw inside arrays.
+* `close()` throws `IllegalStateException` when called while the instance is executing.
+* Arrays passed between Java and JavaScript are limited to 4,194,304 elements in total.
+* `compile()`, file names and global names use standard UTF-8 like `evaluate()`.
+* Calling `get()` again for the same global and interface reuses the native proxy.
+* Leaked instances are detected with a phantom reference instead of `finalize()`.
+* Native frames of QuickJS functions are left out of the unified stack trace.
+* The version is defined once, in `gradle.properties`.
+* The JVM build uses Gradle 9.8.0 and CMake 3.13 or newer. The original `quickjs/android` module
+  and `sample-octane` are no longer built.
+
+### Fixed
+
+* Crashes on cyclic or deeply nested arrays, on `null` arguments, on closing the engine from a
+  callback, and on deep recursion when the engine is used from another thread than the one that
+  created it. These now throw exceptions.
+* A Java exception during argument conversion no longer lets the JavaScript function run.
+* Error messages keep characters outside the BMP and never print `(null)`.
+* `set()` no longer leaves the global behind when it fails.
+* `get()` and proxy calls report exceptions thrown by getters.
+* Array lengths are read correctly for sparse and array-like values.
+* JNI exceptions are checked and local references released; the tests run cleanly under CheckJNI.
+* Initialization failures and module resolution errors are reported instead of crashing or leaking.
+
 
 ## [0.9.2] - 2021-08-04
 
@@ -42,7 +89,7 @@ Maven coordinates are now `app.cash.quickjs:quickjs-android`.
 The API and behavior should otherwise be unchanged.
 
 
-[Unreleased]: https://github.com/cashapp/quickjs-java/compare/0.10.0...HEAD
+[Unreleased]: https://github.com/alanyangcn/quickjs-java/compare/a738129cc4aa99206c00ae49e9c5b15cb58ad880...HEAD
 [0.9.2]: https://github.com/cashapp/quickjs-java/releases/tag/0.9.2
 [0.9.1]: https://github.com/cashapp/quickjs-java/releases/tag/0.9.1
 [0.9.0]: https://github.com/cashapp/quickjs-java/releases/tag/0.9.0

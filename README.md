@@ -1,47 +1,18 @@
-# QuickJS Java
-
-## Android 16 KB fork
-
-This fork preserves the `app.cash.quickjs` Java/JNI API and QuickJS engine from the
-2021-08-04 release of `app.cash.quickjs:quickjs-android:0.9.2` (upstream commit
-`a738129cc4aa99206c00ae49e9c5b15cb58ad880`). The upstream repository is now named
-`cashapp/zipline`; its current `0.9.2` tag refers to a different Zipline release.
-
-The native Android target links with `max-page-size=16384` and
-`common-page-size=16384`. The `quickjs-android` standalone build uses NDK r28c,
-CMake 3.22.1, AGP 9.4.1 and Gradle 9.8.0, and statically links the C++ runtime.
-It builds all four original ABIs. This build requires JDK 17 or newer and Android
-SDK 37; its minimum Android version is API 21, the minimum supported by NDK r28.
-The original legacy Android/JVM build files remain available.
-
-```sh
-cd quickjs-android
-./gradlew assembleRelease
-# Optional: publish app.cash.quickjs:quickjs-android:0.9.2-16kb.2 locally.
-./gradlew publishReleasePublicationToMavenLocal
-```
-
-The rebuilt AAR is `quickjs-android/build/outputs/aar/quickjs-android-release.aar`.
-For reproducible source integration, add this fork as a Git submodule and use a
-Gradle composite build in the consuming project's `settings.gradle.kts`:
-
-```kotlin
-includeBuild("vendor/quickjs-java/quickjs-android") {
-  dependencySubstitution {
-    substitute(module("app.cash.quickjs:quickjs-android")).using(project(":"))
-  }
-}
-```
-
-Check the rebuilt ELF LOAD segment alignments with NDK `llvm-readelf -lW` (the
-alignment must be at least `0x4000` for 64-bit ABIs), and check the consuming APK
-with Android Build Tools `zipalign -c -P 16 -v 4 app.apk`. These checks do not
-replace running the app on a device or emulator whose `adb shell getconf PAGE_SIZE`
-returns `16384`. See [Android's 16 KB page-size guide](https://developer.android.com/guide/practices/page-sizes).
+# QuickJS Java (Android 16 KB fork)
 
 The [QuickJS embeddable JavaScript engine][qjs] packaged for Android and the JVM.
 
-_(Looking for [Duktape Android](#Duktape)?)_
+This fork keeps the `app.cash.quickjs` Java API and QuickJS engine (2021-03-27) of
+`app.cash.quickjs:quickjs-android:0.9.2`, released 2021-08-04 from upstream commit
+`a738129cc4aa99206c00ae49e9c5b15cb58ad880`, and adds:
+
+ * Android native libraries that load on devices with 16 KB pages, for all four ABIs.
+ * A standalone Android build (`quickjs-android/`) with current tools and a minimum of API 21.
+ * Fixes for crashes, swallowed errors and JNI misuse in the bridge, plus resource limits,
+   interruption and explicit `Promise` job execution. See the [change log](CHANGELOG.md).
+
+The upstream repository is now `cashapp/zipline`; its current `0.9.2` tag refers to a different
+Zipline release.
 
 
 ## Usage
@@ -52,32 +23,13 @@ try (QuickJs engine = QuickJs.create()) {
 }
 ```
 
-For long-lived usage feel free to call `QuickJs.create()` and retain the returned instance for as
-long as you need. Be sure to call `.close()` when you are done to avoid leaking native components.
-
-### Supported Java Types
-
-Currently, the following Java types are supported when interfacing with JavaScript:
-
- * `boolean` and `Boolean`
- * `int` and `Integer` - as an argument only (not a return value) when calling JavaScript from Java.
- * `double` and `Double`
- * `String`
- * `void` - as a return value.
-
-`Object` is also supported in declarations, but the type of the actual value passed must be
-one of the above or `null`.
+For long-lived usage, call `QuickJs.create()` and keep the returned instance for as long as you
+need. Call `close()` when you are done to free its native memory.
 
 ### Calling Java from JavaScript
 
-You can provide a Java object for use as a JavaScript global, and call Java functions from
-JavaScript!
-
-#### Example
-
-Suppose we wanted to expose the functionality of [Okio's `ByteString`][okio] in JavaScript to
-convert hex-encoded strings back into UTF-8. First, define a Java interface that declares
-the methods you would like to call from JavaScript:
+You can provide a Java object as a JavaScript global and call its methods from JavaScript. First,
+define a Java interface that declares the methods JavaScript may call:
 
 ```java
 interface Utf8 {
@@ -85,7 +37,7 @@ interface Utf8 {
 }
 ```
 
-Next, implement the interface in Java code (we leave the heavy lifting to Okio):
+Implement it in Java, here with [Okio's `ByteString`][okio]:
 
 ```java
 Utf8 utf8 = new Utf8() {
@@ -95,7 +47,7 @@ Utf8 utf8 = new Utf8() {
 };
 ```
 
-Now you can set the object to a JavaScript global, making it available in JavaScript code:
+Then set it as a JavaScript global:
 
 ```java
 // Attach our interface to a JavaScript object called Utf8.
@@ -113,157 +65,226 @@ Log.d("Greeting", greeting);
 
 ### Calling JavaScript from Java
 
-You can attach a Java interface to a JavaScript global object, and call JavaScript functions
-directly from Java!  The same Java types are supported for function arguments and return
-values as the opposite case above.
-
-#### Example
-
-TODO fix this example, as it no longer works with QuickJS!
-You should still be able to understand what is going on, though.
-
-Imagine a world where we don't have [Okio's `ByteString`][okio]. Fortunately, there's a [Duktape
-builtin][dukdec] that allows us to convert hex-encoded strings back into UTF-8! We can easily set up a
-proxy that allows us to use it directly from our Java code. First, define a Java interface
-that declares the JavaScript methods you would like to call:
+You can attach a Java interface to a JavaScript global object and call its functions from Java.
+Define the interface:
 
 ```java
-interface Utf8 {
-  String fromHex(String hex);
+interface Greeter {
+  String greet(String name);
 }
 ```
 
-Next, we define a global JavaScript object in Duktape to connect to:
+Define the JavaScript object, then get a proxy for it:
 
 ```java
-// Note that Duktape.dec returns a Buffer, we must convert it to a String return value.
-engine.evaluate(""
-    + "var Utf8 = {\n"
-    + "  fromHex: function(v) { return String(Duktape.dec('hex', v)); }\n"
-    + "};");
+engine.evaluate("var Greeter = { greet: function(name) { return 'Hello, ' + name; } };");
+
+Greeter greeter = engine.get("Greeter", Greeter.class);
+Log.d("Greeting", greeter.greet("world")); // Hello, world
 ```
 
-Now you can connect our interface to the JavaScript global, making it available in Java code:
+The interfaces passed to `set()` and `get()` must not extend other interfaces or overload
+methods. The examples in this file are kept working by `ReadmeExamplesTest`.
+
+### Supported types
+
+The same types work in both directions: as parameters and return values of interfaces passed to
+`set()`, which JavaScript calls, and of interfaces passed to `get()`, which Java calls.
+
+| Java type | JavaScript value | Notes |
+| --- | --- | --- |
+| `boolean`, `Boolean` | `true`, `false` | Only booleans; `1` and `'true'` are rejected. |
+| `int`, `Integer` | numbers that are exactly an int | `-0` and `2.0` are accepted; `1.5`, `NaN`, `2147483648` and strings are rejected. |
+| `double`, `Double` | any number | |
+| `String` | strings | Non-strings are rejected. |
+| `Object` | any of the above, or an array of them | Other values (objects, functions, ...) are rejected, at any depth. Java values passed as `Object` must be one of these types too. |
+| Arrays of the above | arrays | Including multi-dimensional arrays such as `Double[][]`. At most 4,194,304 elements. |
+| `void` | ignored | Return type only. |
+
+ * `null` and `undefined` become `null` for boxed types, `String`, `Object` and arrays. For `int`,
+   `double` and `boolean` they are rejected.
+ * Rejected values throw `IllegalArgumentException` with the value in the message, such as
+   `Cannot convert value 1.5 to int`. Errors thrown by JavaScript throw `QuickJsException`.
+ * Methods may be varargs. Java varargs are passed to JavaScript as separate arguments.
+ * Arrays are copied, not shared. Converting an array that contains itself, arrays nested more
+   than 256 deep, or more than 4,194,304 elements in total throws `IllegalArgumentException`.
+
+`evaluate()` and `execute()` return a `String`, `Boolean`, `Integer`, `Double`, `Object[]` of these,
+or `null`. Unlike arguments, values with no Java representation become `null`, at any depth:
+`evaluate("({})")` returns `null` and `evaluate("[{}]")` returns `[null]`.
+
+### Execution contract
+
+ * **Threads.** `QuickJs` is not thread safe. Calls to one instance, including `close()`, must not
+   overlap; serialize them yourself if several threads use it. An instance may move between
+   threads.
+ * **Reentrancy.** A Java method called from JavaScript may call back into the same instance, but
+   it may not `close()` it: that throws `IllegalStateException`.
+ * **Promises.** Jobs such as `Promise` reactions never run on their own. Run them with
+   `executePendingJobs(maxJobs)`; jobs still pending at `close()` are discarded.
+
+   ```java
+   engine.evaluate("var result; Promise.resolve(42).then(function(v) { result = v; });");
+   while (engine.executePendingJobs(100) > 0) {
+     // Keep going until no jobs are left.
+   }
+   ```
+
+ * **Proxies.** A proxy from `get()` looks up the global by name on every call, so it sees later
+   reassignments of that global.
+ * **Bytecode.** Bytecode from `compile()` only runs on the same QuickJS version. Never `execute()`
+   bytecode from an untrusted source: QuickJS doesn't validate it.
+ * **Leaks.** An instance that is garbage collected without being closed leaks its native memory;
+   a warning is logged.
+
+### Limits and interruption
 
 ```java
-// Connect our interface to a JavaScript object called Utf8.
-Utf8 utf8 = engine.get("Utf8", Utf8.class);
-
-// Call into the JavaScript object to decode a string.
-String greeting = utf8.fromHex("EC9588EB8595ED9598EC84B8EC9A9421");
-Log.d("Greeting", greeting);
+engine.setMemoryLimit(16 * 1024 * 1024); // Bytes; 0 removes the limit.
+engine.setMaxStackSize(256 * 1024);      // The default; 0 removes the limit.
+final long deadline = System.nanoTime() + 100_000_000L; // 100 ms.
+engine.setInterruptHandler(new QuickJs.InterruptHandler() {
+  @Override public boolean poll() {
+    return System.nanoTime() > deadline;
+  }
+});
 ```
 
-## Download
+Exceeding a limit throws `QuickJsException` (`out of memory`, `stack overflow`). The interrupt
+handler is polled on the thread running JavaScript; when it returns `true`, the script stops with a
+`QuickJsException` (`interrupted`) that JavaScript can't catch.
 
-### Android
 
-```groovy
-repositories {
-  mavenCentral()
-}
-dependencies {
-  implementation 'app.cash.quickjs:quickjs-android:0.9.2'
-}
+## Using this fork
+
+This fork isn't published to Maven Central. Use it in one of these ways.
+
+### Android: source with a composite build
+
+Add the fork as a Git submodule of your project:
+
+```sh
+git submodule add https://github.com/alanyangcn/quickjs-java.git vendor/quickjs-java
+git submodule update --init
 ```
 
-This library is provided as a "fat" `.aar` with native binaries for all available architectures.
-To reduce your binary size, use
-[ABI filtering/splitting](https://developer.android.com/studio/build/configure-apk-splits.html)
-when building an APK and/or enable
-[Android App Bundles](https://developer.android.com/guide/app-bundle).
+In your `settings.gradle.kts`, include its Android build:
 
-<details>
-<summary>Snapshots of the development version are available in Sonatype's snapshots repository.</summary>
-<p>
-
-```groovy
-repository {
-  mavenCentral()
-  maven {
-    url 'https://oss.sonatype.org/content/repositories/snapshots/'
+```kotlin
+includeBuild("vendor/quickjs-java/quickjs-android") {
+  dependencySubstitution {
+    substitute(module("app.cash.quickjs:quickjs-android")).using(project(":"))
   }
 }
+```
+
+Then depend on it as usual:
+
+```kotlin
 dependencies {
-  implementation 'app.cash.quickjs:quickjs-android:1.0.0-SNAPSHOT'
+  implementation("app.cash.quickjs:quickjs-android:0.9.2-16kb.3-SNAPSHOT")
 }
 ```
 
-</p>
-</details>
+The building machine needs JDK 17 or newer and the Android SDK; Gradle downloads NDK r28c and uses
+CMake 3.22.1 from the SDK.
 
+### Android: local Maven repository
+
+```sh
+cd quickjs-android
+./gradlew publishReleasePublicationToMavenLocal
+```
+
+Then add `mavenLocal()` to your repositories and depend on
+`app.cash.quickjs:quickjs-android:<version>`, with the version from `gradle.properties`.
+
+### Android: AAR
+
+Download `quickjs-android-<version>.aar` from a [release][releases], or build it with
+`./gradlew assembleRelease` in `quickjs-android/`
+(`build/outputs/aar/quickjs-android-release.aar`), and add it to your project:
+
+```kotlin
+dependencies {
+  implementation(files("libs/quickjs-android-0.9.2-16kb.3.aar"))
+  implementation("androidx.annotation:annotation:1.1.0")
+}
+```
+
+The AAR has native libraries for `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64`. To reduce your app's
+size, use [ABI splits](https://developer.android.com/build/configure-apk-splits) or an
+[Android App Bundle](https://developer.android.com/guide/app-bundle).
 
 ### JVM
 
-```groovy
-repositories {
-  mavenCentral()
-}
-dependencies {
-  implementation 'app.cash.quickjs:quickjs-jvm:0.9.2'
-}
+Download `quickjs-jvm-<version>.jar` from a [release][releases]. It supports Linux and macOS on
+x86_64 and arm64 (aarch64), and needs `androidx.annotation:annotation:1.1.0`. To build it, see
+below.
+
+### Checking 16 KB page support
+
+The build already checks the AAR. To check your own app, run:
+
+```sh
+scripts/check-elf-alignment.sh app.apk
 ```
 
-Only Linux and Mac OS are currently supported by the JVM artifact.
-
-<details>
-<summary>Snapshots of the development version are available in Sonatype's snapshots repository.</summary>
-<p>
-
-```groovy
-repository {
-  mavenCentral()
-  maven {
-    url 'https://oss.sonatype.org/content/repositories/snapshots/'
-  }
-}
-dependencies {
-  implementation 'app.cash.quickjs:quickjs-jvm:1.0.0-SNAPSHOT'
-}
-```
-
-</p>
-</details>
+It verifies that every native library's ELF LOAD segments are aligned to at least 16 KB
+(`llvm-readelf -lW`) and that the APK passes `zipalign -c -P 16`. It needs `ANDROID_HOME`, or
+`llvm-readelf` and `zipalign` on the `PATH`. These checks don't replace running the app on a device
+or emulator where `adb shell getconf PAGE_SIZE` prints `16384`; see
+[Android's 16 KB page size guide](https://developer.android.com/guide/practices/page-sizes).
 
 
 ## Building
 
-### For Android
+The version is `VERSION_NAME` in `gradle.properties`; both builds read it from there.
 
-```
-$ ./gradlew :quickjs:android:build
-```
+### Android
 
-The build system will automatically cross-compile the native library to all applicable ABIs and
-create the fat `.aar` in `quickjs/android/build/outputs/aar/`.
-
-This will not run the tests. You must have a working device or emulator connected at which point
-you can explicitly run them.
-
-```
-$ ./gradlew :quickjs:android:connectedCheck
+```sh
+cd quickjs-android
+./gradlew build                      # Builds the AAR, runs lint and checks 16 KB alignment.
+./gradlew connectedDebugAndroidTest  # Runs the tests on a connected device or emulator.
 ```
 
-### For the JVM
+The tests in `quickjs/common/test` run both as instrumentation tests and on the JVM.
 
-First, build the native library for your host OS:
-```
-$ cmake -S quickjs/jvm/ -B build/jni/ -DQUICKJS_VERSION="$(cat quickjs/common/native/quickjs/VERSION)"
-$ cmake --build build/jni/ --verbose
-```
+### JVM
 
-Next, copy the resulting binary into the resources of the JVM project:
-```
-$ mkdir -p quickjs/jvm/src/main/resources/
-$ cp -v build/jni/libquickjs.* quickjs/jvm/src/main/resources/
+The JVM build needs JDK 17 or newer, CMake 3.13 or newer and a C/C++ compiler. First build the
+native library for your machine into `quickjs/jvm/src/main/resources/<os>-<arch>/`:
+
+```sh
+scripts/build-jvm-native.sh
 ```
 
-Finally, build the platform-specific `.jar` and run the tests:
-```
-$ ./gradlew :quickjs:jvm:build
+Then build the JAR and run the tests, which use CheckJNI and fail on its warnings:
+
+```sh
+./gradlew :quickjs:jvm:build
 ```
 
-The `.jar` will be available in `quickjs/jvm/build/libs/`. 
+The JAR is in `quickjs/jvm/build/libs/`. It includes the native libraries found in
+`quickjs/jvm/src/main/resources/`; CI builds a JAR with all four platforms.
+
+### Updating QuickJS
+
+```sh
+./update_quickjs.sh https://bellard.org/quickjs/quickjs-2021-03-27.tar.xz
+```
+
+
+## History
+
+Upstream released `app.cash.quickjs:quickjs-android` and `quickjs-jvm` up to 0.9.2 on Maven
+Central. Those versions don't support 16 KB pages and lack this fork's fixes. The original
+`quickjs/android` module and the `sample-octane` app are no longer built.
+
+This repository used to host an Android packaging of the [Duktape](https://duktape.org/) engine.
+Its history and release tags are still present, and its versions are listed on
+[Maven Central](https://central.sonatype.com/artifact/com.squareup.duktape/duktape-android).
 
 
 ## License
@@ -282,19 +303,9 @@ The `.jar` will be available in `quickjs/jvm/build/libs/`.
     See the License for the specific language governing permissions and
     limitations under the License.
 
-
 Note: The included C code from QuickJS is licensed under MIT.
 
 
-## Duktape
-
-This repository used to host an Android-specific packaging of the [Duktape](https://duktape.org/)
-engine. We have changed to using QuickJS with exactly the same features and API. The Duktape
-history is still present in this repo as are the release tags. Available versions are listed on
-[Maven central](https://search.maven.org/artifact/com.squareup.duktape/duktape-android).
-
-
-
-
  [qjs]: https://bellard.org/quickjs/
- [okio]: https://github.com/square/okio/blob/master/okio/src/main/java/okio/ByteString.java
+ [okio]: https://github.com/square/okio
+ [releases]: https://github.com/alanyangcn/quickjs-java/releases
