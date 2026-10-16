@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+
+## [0.10.0-16kb.1] - 2026-10-16
+
 Changes in this fork since upstream 0.9.2. Earlier builds of the fork were versioned
 `0.9.2-16kb.1` and `0.9.2-16kb.2` but not tagged. This release is `0.10.0-16kb.1` because it
 changes behavior that callers may rely on.
@@ -119,7 +122,8 @@ Maven coordinates are now `app.cash.quickjs:quickjs-android`.
 The API and behavior should otherwise be unchanged.
 
 
-[Unreleased]: https://github.com/alanyangcn/quickjs-java/compare/a738129cc4aa99206c00ae49e9c5b15cb58ad880...HEAD
+[Unreleased]: https://github.com/alanyangcn/quickjs-java/compare/0.10.0-16kb.1...HEAD
+[0.10.0-16kb.1]: https://github.com/alanyangcn/quickjs-java/compare/a738129cc4aa99206c00ae49e9c5b15cb58ad880...0.10.0-16kb.1
 [0.9.2]: https://github.com/cashapp/quickjs-java/releases/tag/0.9.2
 [0.9.1]: https://github.com/cashapp/quickjs-java/releases/tag/0.9.1
 [0.9.0]: https://github.com/cashapp/quickjs-java/releases/tag/0.9.0

@@ -198,7 +198,7 @@ Then depend on it as usual:
 
 ```kotlin
 dependencies {
-  implementation("app.cash.quickjs:quickjs-android:0.10.0-16kb.1-SNAPSHOT")
+  implementation("app.cash.quickjs:quickjs-android:0.10.0-16kb.1")
 }
 ```
 
