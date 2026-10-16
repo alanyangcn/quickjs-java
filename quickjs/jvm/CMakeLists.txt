@@ -24,6 +24,8 @@ file(GLOB_RECURSE sources "../common/native/*.c" "../common/native/*.cpp")
 
 add_library(quickjs SHARED ${sources})
 target_compile_definitions(quickjs PUBLIC CONFIG_VERSION="${QUICKJS_VERSION}")
+# QuickJS uses GNU extensions such as malloc_usable_size().
+target_compile_definitions(quickjs PRIVATE _GNU_SOURCE)
 
 if(NOT APPLE)
   # Don't depend on the build machine's C++ runtime.

@@ -166,6 +166,9 @@ Context::Context(JNIEnv* env)
   env->GetJavaVM(&javaVm);
   if (jsRuntime) {
     JS_SetRuntimeOpaque(jsRuntime, this);
+    // QuickJS defaults to 1 MiB, which is as large as the whole stack of many threads (Android
+    // gives non-main threads about 1 MiB). Leave room for the JVM and the bridge.
+    JS_SetMaxStackSize(jsRuntime, DEFAULT_MAX_STACK_SIZE);
   }
 }
 

@@ -19,6 +19,12 @@ Changes in this fork since upstream 0.9.2. Earlier builds of the fork were versi
 
 ### Changed
 
+* QuickJS is updated from 2021-03-27 to 2026-06-04, which adds many newer JavaScript features
+  (see its [change log](https://bellard.org/quickjs/Changelog)) and fixes a use-after-free that
+  could crash the process when JavaScript ran out of memory. Bytecode from `compile()` with
+  earlier versions can't be executed, some error messages changed, and stack traces of functions
+  called through a proxy now include line numbers. The default stack limit stays 256 KiB rather
+  than QuickJS's new default of 1 MiB.
 * Numbers and booleans convert by the same strict rules everywhere: `int` and `Integer` accept only
   numbers that are exactly an int, `boolean` and `Boolean` only booleans. Previously some
   directions converted `'abc'` to `0` or used truthiness.

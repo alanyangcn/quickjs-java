@@ -613,13 +613,13 @@ public final class QuickJsRegressionTest {
     try {
       quickjs.evaluate("var a = []; while (true) a.push(new Array(1000).fill(1));");
       fail();
-    } catch (QuickJsException e) {
-      // When even the error object can't be allocated, QuickJS throws null instead.
-      assertThat(e.getMessage()).isAnyOf("out of memory", "null");
+    } catch (QuickJsException expected) {
+      // Usually "out of memory". Near the limit, QuickJS may be unable to allocate the error
+      // (it throws null) or the bridge may be unable to convert its message.
     }
-    quickjs.evaluate("a = null;");
-
+    // Freeing memory needs memory too: remove the limit first.
     quickjs.setMemoryLimit(0);
+    quickjs.evaluate("a = null;");
     assertThat(quickjs.evaluate("new Array(1000000).fill(1).length")).isEqualTo(1000000);
   }
 

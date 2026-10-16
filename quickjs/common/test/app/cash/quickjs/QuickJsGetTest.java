@@ -131,7 +131,7 @@ public final class QuickJsGetTest {
       proxy.getValue();
       fail();
     } catch (QuickJsException expected) {
-      assertThat(expected.getStackTrace()[0].toString()).isEqualTo("JavaScript.getValue(test.js)");
+      assertThat(expected.getStackTrace()[0].toString()).isEqualTo("JavaScript.getValue(test.js:1)");
       assertThat(expected.getStackTrace()[1].toString())
           .isEqualTo("app.cash.quickjs.QuickJs.call(Native Method)");
     }

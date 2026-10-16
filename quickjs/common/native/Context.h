@@ -100,6 +100,8 @@ public:
   // An exception thrown by the interrupt handler, rethrown in place of "interrupted".
   mutable jthrowable interruptCause = nullptr;
 
+  // The native stack JavaScript may use unless QuickJs.setMaxStackSize() says otherwise.
+  static const size_t DEFAULT_MAX_STACK_SIZE = 256 * 1024;
   // Largest array, and most array elements in one conversion, passed between JavaScript and Java.
   static const jsize MAX_ARRAY_LENGTH = 1 << 22;
   // Arrays currently being converted by toJavaObject(), used to detect cycles.

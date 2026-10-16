@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 11)
 file(GLOB_RECURSE sources "../common/native/*.c" "../common/native/*.cpp")
 
 add_library(quickjs SHARED ${sources})
+# QuickJS uses GNU extensions such as malloc_usable_size().
+target_compile_definitions(quickjs PRIVATE _GNU_SOURCE)
 
 if(DEFINED QUICKJS_VERSION)
   target_compile_definitions(quickjs PRIVATE CONFIG_VERSION="${QUICKJS_VERSION}")

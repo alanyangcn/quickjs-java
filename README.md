@@ -2,10 +2,10 @@
 
 The [QuickJS embeddable JavaScript engine][qjs] packaged for Android and the JVM.
 
-This fork keeps the `app.cash.quickjs` Java API and QuickJS engine (2021-03-27) of
-`app.cash.quickjs:quickjs-android:0.9.2`, released 2021-08-04 from upstream commit
-`a738129cc4aa99206c00ae49e9c5b15cb58ad880`, and adds:
+This fork keeps the `app.cash.quickjs` Java API of `app.cash.quickjs:quickjs-android:0.9.2`,
+released 2021-08-04 from upstream commit `a738129cc4aa99206c00ae49e9c5b15cb58ad880`, and adds:
 
+ * QuickJS 2026-06-04, updated from 2021-03-27.
  * Android native libraries that load on devices with 16 KB pages, for all four ABIs.
  * A standalone Android build (`quickjs-android/`) with current tools and a minimum of API 21.
  * Fixes for crashes, swallowed errors and JNI misuse in the bridge, plus resource limits,
@@ -272,7 +272,7 @@ The JAR is in `quickjs/jvm/build/libs/`. It includes the native libraries found 
 ### Updating QuickJS
 
 ```sh
-./update_quickjs.sh https://bellard.org/quickjs/quickjs-2021-03-27.tar.xz
+./update_quickjs.sh https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz
 ```
 
 

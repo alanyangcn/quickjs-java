@@ -3,7 +3,7 @@
 # Replaces the vendored QuickJS sources with those of a release.
 #
 # Usage: ./update_quickjs.sh URL
-#   URL is a release tarball, e.g. https://bellard.org/quickjs/quickjs-2021-03-27.tar.xz
+#   URL is a release tarball, e.g. https://bellard.org/quickjs/quickjs-2026-06-04.tar.xz
 #
 # The new sources are prepared in a temporary directory and only replace the current ones once
 # everything has been downloaded and checked, so a failure leaves the tree untouched.
@@ -22,6 +22,7 @@ target=quickjs/common/native/quickjs
 # Files copied from the release. Review this list against each new release.
 files=(
   cutils.c cutils.h
+  dtoa.c dtoa.h
   libregexp.c libregexp.h libregexp-opcode.h
   libunicode.c libunicode.h libunicode-table.h
   list.h
