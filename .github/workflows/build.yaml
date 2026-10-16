@@ -122,10 +122,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The minimum supported API level.
+          # The minimum supported API level. It has no getconf to check the page size.
           - api-level: 21
             target: default
-            page-size: 4096
+            page-size: ''
           # A device with 16 KB pages.
           - api-level: 35
             target: google_apis_ps16k
@@ -153,5 +153,17 @@ jobs:
           arch: x86_64
           working-directory: quickjs-android
           script: |
-            test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = "${{ matrix.page-size }}"
+            if [ -n "${{ matrix.page-size }}" ]; then test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = "${{ matrix.page-size }}"; fi
             ./gradlew connectedDebugAndroidTest
+
+      - name: Show failed tests
+        if: failure()
+        run: scripts/print-test-failures.py quickjs-android/build/outputs/androidTest-results/connected
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: android-test-results-${{ matrix.api-level }}
+          path: |
+            quickjs-android/build/reports/androidTests/
+            quickjs-android/build/outputs/androidTest-results/
