@@ -79,6 +79,10 @@ public:
   jmethodID quickJsExceptionConstructor;
   std::vector<JsObjectProxy*> objectProxies;
   std::unordered_map<std::string, jclass> globalReferences;
+
+  // Arrays currently being converted by toJavaObject(), used to detect cycles.
+  static const size_t MAX_ARRAY_NESTING_DEPTH = 256;
+  std::vector<void*> arraysBeingConverted;
 };
 
 std::string getName(JNIEnv* env, jobject javaClass);

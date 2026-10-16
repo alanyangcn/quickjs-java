@@ -51,6 +51,12 @@ public final class QuickJs implements Closeable {
 
   private long context;
 
+  /**
+   * Number of native calls in progress on this instance. JavaScript can call back into Java, which
+   * may call into QuickJs again, so this counts reentrant calls on the same thread.
+   */
+  private int activeCalls;
+
   private QuickJs(long context) {
     this.context = context;
   }
@@ -63,7 +69,14 @@ public final class QuickJs implements Closeable {
    */
   @Nullable
   public Object evaluate(@NonNull String script, @NonNull String fileName) {
-    return evaluate(context, script, fileName);
+    checkNotNull(script, "script");
+    checkNotNull(fileName, "fileName");
+    activeCalls++;
+    try {
+      return evaluate(context, script, fileName);
+    } finally {
+      activeCalls--;
+    }
   }
 
   /**
@@ -73,7 +86,7 @@ public final class QuickJs implements Closeable {
    */
   @Nullable
   public Object evaluate(@NonNull String script) {
-    return evaluate(context, script, "?");
+    return evaluate(script, "?");
   }
 
   /**
@@ -87,6 +100,9 @@ public final class QuickJs implements Closeable {
    */
   public <T> void set(@NonNull String name, @NonNull Class<T> type,
       @NonNull T object) {
+    checkNotNull(name, "name");
+    checkNotNull(type, "type");
+    checkNotNull(object, "object");
     if (!type.isInterface()) {
       throw new UnsupportedOperationException("Only interfaces can be bound. Received: " + type);
     }
@@ -103,7 +119,12 @@ public final class QuickJs implements Closeable {
         throw new UnsupportedOperationException(method.getName() + " is overloaded in " + type);
       }
     }
-    set(context, name, object, methods.values().toArray());
+    activeCalls++;
+    try {
+      set(context, name, object, methods.values().toArray());
+    } finally {
+      activeCalls--;
+    }
   }
 
   /**
@@ -117,6 +138,8 @@ public final class QuickJs implements Closeable {
    */
   @NonNull
   public <T> T get(@NonNull final String name, @NonNull final Class<T> type) {
+    checkNotNull(name, "name");
+    checkNotNull(type, "type");
     if (!type.isInterface()) {
       throw new UnsupportedOperationException("Only interfaces can be proxied. Received: " + type);
     }
@@ -131,7 +154,13 @@ public final class QuickJs implements Closeable {
       }
     }
 
-    final long instance = get(context, name, methods.values().toArray());
+    final long instance;
+    activeCalls++;
+    try {
+      instance = get(context, name, methods.values().toArray());
+    } finally {
+      activeCalls--;
+    }
     if (instance == 0) {
       throw new OutOfMemoryError("Cannot create QuickJs proxy to " + name);
     }
@@ -152,7 +181,12 @@ public final class QuickJs implements Closeable {
                   throw new AssertionError("Unexpected Object method: " + method);
               }
             }
-            return call(context, instance, method, args);
+            activeCalls++;
+            try {
+              return call(context, instance, method, args);
+            } finally {
+              activeCalls--;
+            }
           }
 
           @Override
@@ -171,7 +205,14 @@ public final class QuickJs implements Closeable {
    */
   @NonNull
   public byte[] compile(@NonNull String sourceCode, @NonNull String fileName) {
-    return compile(context, sourceCode, fileName);
+    checkNotNull(sourceCode, "sourceCode");
+    checkNotNull(fileName, "fileName");
+    activeCalls++;
+    try {
+      return compile(context, sourceCode, fileName);
+    } finally {
+      activeCalls--;
+    }
   }
 
   /**
@@ -181,14 +222,26 @@ public final class QuickJs implements Closeable {
    */
   @Nullable
   public Object execute(@NonNull byte[] bytecode) {
-    return execute(context, bytecode);
+    checkNotNull(bytecode, "bytecode");
+    activeCalls++;
+    try {
+      return execute(context, bytecode);
+    } finally {
+      activeCalls--;
+    }
   }
 
   /**
    * Release the native resources associated with this object. You <strong>must</strong> call this
    * method for each instance to avoid leaking native memory.
+   *
+   * @throws IllegalStateException if called while this instance is executing, such as from a Java
+   *     method that JavaScript is calling.
    */
   @Override public void close() {
+    if (activeCalls > 0) {
+      throw new IllegalStateException("Cannot close QuickJs while it is executing");
+    }
     if (context != 0) {
       long contextToClose = context;
       context = 0;
@@ -199,6 +252,13 @@ public final class QuickJs implements Closeable {
   @Override protected void finalize() {
     if (context != 0) {
       Logger.getLogger(getClass().getName()).warning("QuickJs instance leaked!");
+    }
+  }
+
+  // Not Objects.requireNonNull(), which needs API 19.
+  private static void checkNotNull(Object value, String name) {
+    if (value == null) {
+      throw new NullPointerException(name + " == null");
     }
   }
 

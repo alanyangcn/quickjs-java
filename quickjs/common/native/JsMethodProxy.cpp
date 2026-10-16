@@ -50,30 +50,37 @@ JsMethodProxy::JsMethodProxy(Context* context, JNIEnv* env, const char* name, jo
 jobject JsMethodProxy::call(Context* context, JNIEnv* env, JSValue thisPointer, jobjectArray args) const {
   const auto totalArgs = std::min<int>(argumentLoaders.size(), args ? env->GetArrayLength(args) : 0);
   std::vector<JSValue> arguments;
+  // Converters report failures either as a pending Java exception or by returning JS_EXCEPTION
+  // with the cause pending in JavaScript. Either way, the JavaScript function must not be called.
+  bool failed = false;
   int numArgs;
   jvalue arg;
-  for (numArgs = 0; numArgs < totalArgs && !env->ExceptionCheck(); numArgs++) {
+  for (numArgs = 0; numArgs < totalArgs && !failed && !env->ExceptionCheck(); numArgs++) {
     arg.l = env->GetObjectArrayElement(args, numArgs);
-    if (!isVarArgs || numArgs < totalArgs - 1) {
-      arguments.push_back(argumentLoaders[numArgs](context, env, arg));
-    } else {
-      auto varArgs = argumentLoaders[numArgs](context, env, arg);
-      if (JS_IsArray(context->jsContext, varArgs)) {
-        auto len = JS_GetPropertyStr(context->jsContext, varArgs, "length");
-        for (int i = 0, e = JS_VALUE_GET_INT(len); i < e; i++) {
-          arguments.push_back(JS_GetPropertyUint32(context->jsContext, varArgs, i));
-        }
-        JS_FreeValue(context->jsContext, len);
-        JS_FreeValue(context->jsContext, varArgs);
-      } else {
-        arguments.push_back(varArgs);
-      }
-    }
+    auto value = argumentLoaders[numArgs](context, env, arg);
     env->DeleteLocalRef(arg.l);
+    if (JS_IsException(value)) {
+      failed = true;
+    } else if (!isVarArgs || numArgs < totalArgs - 1) {
+      arguments.push_back(value);
+    } else if (JS_IsArray(context->jsContext, value)) {
+      auto len = JS_GetPropertyStr(context->jsContext, value, "length");
+      for (int i = 0, e = JS_VALUE_GET_INT(len); i < e; i++) {
+        arguments.push_back(JS_GetPropertyUint32(context->jsContext, value, i));
+      }
+      JS_FreeValue(context->jsContext, len);
+      JS_FreeValue(context->jsContext, value);
+    } else {
+      arguments.push_back(value);
+    }
   }
 
   jobject result;
-  if (!env->ExceptionCheck()) {
+  if (failed) {
+    // Rethrows the original Java exception if the JavaScript error carries one.
+    context->throwJsException(env, JS_EXCEPTION);
+    result = nullptr;
+  } else if (!env->ExceptionCheck()) {
     auto property = JS_NewAtom(context->jsContext, name.c_str());
     JSValue callResult = JS_Invoke(context->jsContext, thisPointer, property, arguments.size(),
                                    arguments.data());

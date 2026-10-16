@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "Context.h"
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <limits>
@@ -62,6 +63,21 @@ void jsFinalize(JSRuntime* jsRuntime, JSValue val) {
   if (context) {
     delete reinterpret_cast<JavaObjectProxy*>(JS_GetOpaque(val, context->jsClassId));
   }
+}
+
+/*
+ * Returns `value` as a UTF-8 string for error messages. Never fails: values that cannot be
+ * converted (such as symbols) get a placeholder.
+ */
+std::string describeValue(JSContext* jsContext, JSValueConst value) {
+  const char* str = JS_ToCString(jsContext, value);
+  if (!str) {
+    JS_FreeValue(jsContext, JS_GetException(jsContext));
+    return "<unprintable>";
+  }
+  std::string result(str);
+  JS_FreeCString(jsContext, str);
+  return result;
 }
 
 struct JniThreadDetacher {
@@ -122,7 +138,12 @@ Context::~Context() {
 }
 
 jobject Context::execute(JNIEnv* env, jbyteArray byteCode) {
+  if (!byteCode) {
+    throwJavaException(env, "java/lang/NullPointerException", "bytecode == null");
+    return nullptr;
+  }
   const auto buffer = env->GetByteArrayElements(byteCode, nullptr);
+  if (!buffer) return nullptr;
   const auto bufferLength = env->GetArrayLength(byteCode);
   const auto flags = JS_READ_OBJ_BYTECODE | JS_READ_OBJ_REFERENCE;
   auto obj = JS_ReadObject(jsContext, reinterpret_cast<const uint8_t*>(buffer), bufferLength, flags);
@@ -152,8 +173,18 @@ jobject Context::execute(JNIEnv* env, jbyteArray byteCode) {
 }
 
 jbyteArray Context::compile(JNIEnv* env, jstring source, jstring file) {
+  if (!source || !file) {
+    throwJavaException(env, "java/lang/NullPointerException",
+                       source ? "fileName == null" : "sourceCode == null");
+    return nullptr;
+  }
   const auto sourceCode = env->GetStringUTFChars(source, 0);
+  if (!sourceCode) return nullptr;
   const auto fileName = env->GetStringUTFChars(file, 0);
+  if (!fileName) {
+    env->ReleaseStringUTFChars(source, sourceCode);
+    return nullptr;
+  }
 
   auto compiled = JS_Eval(jsContext, sourceCode, strlen(sourceCode), fileName, JS_EVAL_FLAG_COMPILE_ONLY);
 
@@ -183,9 +214,14 @@ jbyteArray Context::compile(JNIEnv* env, jstring source, jstring file) {
 }
 
 JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray methods) {
-  JSValue global = JS_GetGlobalObject(jsContext);
-
+  if (!name) {
+    throwJavaException(env, "java/lang/NullPointerException", "name == null");
+    return nullptr;
+  }
   const char* nameStr = env->GetStringUTFChars(name, 0);
+  if (!nameStr) return nullptr;
+
+  JSValue global = JS_GetGlobalObject(jsContext);
 
   JSValue obj = JS_GetPropertyStr(jsContext, global, nameStr);
 
@@ -239,9 +275,15 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
 }
 
 void Context::setObjectProxy(JNIEnv* env, jstring name, jobject object, jobjectArray methods) {
-  auto global = JS_GetGlobalObject(jsContext);
-
+  if (!name || !object) {
+    throwJavaException(env, "java/lang/NullPointerException",
+                       name ? "object == null" : "name == null");
+    return;
+  }
   const char* nameStr = env->GetStringUTFChars(name, 0);
+  if (!nameStr) return;
+
+  auto global = JS_GetGlobalObject(jsContext);
 
   const auto objName = JS_NewAtom(jsContext, nameStr);
   if (!JS_HasProperty(jsContext, global, objName)) {
@@ -320,24 +362,46 @@ Context::toJavaObject(JNIEnv* env, const JSValueConst& value, bool throwOnUnsupp
 
     case JS_TAG_OBJECT:
       if (JS_IsArray(jsContext, value)) {
+        // Only arrays on the current conversion path count: the same array may appear twice.
+        const auto array = JS_VALUE_GET_PTR(value);
+        if (std::find(arraysBeingConverted.begin(), arraysBeingConverted.end(), array)
+            != arraysBeingConverted.end()) {
+          throwJavaException(env, "java/lang/IllegalArgumentException",
+                             "Cannot marshal a cyclic JavaScript array to Java");
+          result = nullptr;
+          break;
+        }
+        if (arraysBeingConverted.size() >= MAX_ARRAY_NESTING_DEPTH) {
+          throwJavaException(env, "java/lang/IllegalArgumentException",
+                             "Cannot marshal JavaScript arrays nested deeper than %d to Java",
+                             static_cast<int>(MAX_ARRAY_NESTING_DEPTH));
+          result = nullptr;
+          break;
+        }
+        arraysBeingConverted.push_back(array);
         const auto arrayLength = JS_VALUE_GET_INT(JS_GetPropertyStr(jsContext, value, "length"));
         result = env->NewObjectArray(arrayLength, objectClass, nullptr);
-        for (int i = 0; i < arrayLength && !env->ExceptionCheck(); i++) {
+        for (int i = 0; result && i < arrayLength && !env->ExceptionCheck(); i++) {
           auto element = JS_GetPropertyUint32(jsContext, value, i);
           auto javaElement = toJavaObject(env, element);
           if (!env->ExceptionCheck()) {
             env->SetObjectArrayElement(static_cast<jobjectArray>(result), i, javaElement);
           }
+          env->DeleteLocalRef(javaElement);
           JS_FreeValue(jsContext, element);
+        }
+        arraysBeingConverted.pop_back();
+        if (env->ExceptionCheck()) {
+          env->DeleteLocalRef(result);
+          result = nullptr;
         }
         break;
       }
       // Fall through.
     default:
       if (throwOnUnsupportedType) {
-        auto str = JS_ToCString(jsContext, value);
-        throwJsExceptionFmt(env, this, "Cannot marshal value %s to Java", str);
-        JS_FreeCString(jsContext, str);
+        throwJsExceptionFmt(env, this, "Cannot marshal value %s to Java",
+                            describeValue(jsContext, value).c_str());
       }
       result = nullptr;
       break;
@@ -346,6 +410,11 @@ Context::toJavaObject(JNIEnv* env, const JSValueConst& value, bool throwOnUnsupp
 }
 
 jobject Context::eval(JNIEnv* env, jstring source, jstring file) {
+  if (!source || !file) {
+    throwJavaException(env, "java/lang/NullPointerException",
+                       source ? "fileName == null" : "sourceCode == null");
+    return nullptr;
+  }
   std::string sourceCodeString = toCppString(env, source);
   if (env->ExceptionCheck()) return nullptr;
 
@@ -378,6 +447,10 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
         auto elements = env->GetDoubleArrayElements(static_cast<jdoubleArray>(v.l), nullptr);
+        if (!elements) {
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
+        }
         const auto length = env->GetArrayLength(static_cast<jarray>(v.l));
         for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
           JS_SetPropertyUint32(c->jsContext, result, i, JS_NewFloat64(c->jsContext, elements[i]));
@@ -394,6 +467,10 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
         auto elements = env->GetIntArrayElements(static_cast<jintArray >(v.l), nullptr);
+        if (!elements) {
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
+        }
         const auto length = env->GetArrayLength(static_cast<jarray>(v.l));
         for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
           JS_SetPropertyUint32(c->jsContext, result, i, JS_NewInt32(c->jsContext, elements[i]));
@@ -410,6 +487,10 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
         auto elements = env->GetBooleanArrayElements(static_cast<jbooleanArray>(v.l), nullptr);
+        if (!elements) {
+          JS_FreeValue(c->jsContext, result);
+          return c->throwJavaExceptionFromJs(env);
+        }
         const auto length = env->GetArrayLength(static_cast<jarray>(v.l));
         for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
           JS_SetPropertyUint32(c->jsContext, result, i, JS_NewBool(c->jsContext, elements[i]));
@@ -431,7 +512,14 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
           element.l = env->GetObjectArrayElement(static_cast<jobjectArray >(v.l), i);
           if (!env->ExceptionCheck()) {
-            JS_SetPropertyUint32(c->jsContext, result, i, converter(c, env, element));
+            auto jsElement = converter(c, env, element);
+            if (JS_IsException(jsElement)) {
+              // A nested conversion failed; its exception is already pending in JavaScript.
+              env->DeleteLocalRef(element.l);
+              JS_FreeValue(c->jsContext, result);
+              return JS_EXCEPTION;
+            }
+            JS_SetPropertyUint32(c->jsContext, result, i, jsElement);
           }
           env->DeleteLocalRef(element.l);
         }
@@ -542,10 +630,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
               double element;
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
               if (!JS_IsNumber(jsElement)) {
-                const auto str = JS_ToCString(c->jsContext, jsElement);
                 throwJavaException(env, "java/lang/IllegalArgumentException",
-                                   "Cannot convert value %s to double", str);
-                JS_FreeCString(c->jsContext, str);
+                                   "Cannot convert value %s to double",
+                                   describeValue(c->jsContext, jsElement).c_str());
               } else if (JS_ToFloat64(c->jsContext, &element, jsElement)) {
                 c->throwJsException(env, jsElement);
               } else {
@@ -578,10 +665,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
               int element;
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
               if (JS_VALUE_GET_TAG(jsElement) != JS_TAG_INT) {
-                const auto str = JS_ToCString(c->jsContext, jsElement);
                 throwJavaException(env, "java/lang/IllegalArgumentException",
-                                   "Cannot convert value %s to int", str);
-                JS_FreeCString(c->jsContext, str);
+                                   "Cannot convert value %s to int",
+                                   describeValue(c->jsContext, jsElement).c_str());
               } else if (JS_ToInt32(c->jsContext, &element, jsElement)) {
                 c->throwJsException(env, jsElement);
               } else {
@@ -613,10 +699,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
             for (int i = 0; i < length && !env->ExceptionCheck(); i++) {
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
               if (!JS_IsBool(jsElement)) {
-                const auto str = JS_ToCString(c->jsContext, jsElement);
                 throwJavaException(env, "java/lang/IllegalArgumentException",
-                                   "Cannot convert value %s to boolean", str);
-                JS_FreeCString(c->jsContext, str);
+                                   "Cannot convert value %s to boolean",
+                                   describeValue(c->jsContext, jsElement).c_str());
               } else {
                 int r = JS_ToBool(c->jsContext, jsElement);
                 if (r < 0) {
@@ -677,10 +762,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
         c->throwJsException(env, v);
       } else if (!JS_IsString(v)) {
         result.l = nullptr;
-        const auto str = JS_ToCString(c->jsContext, v);
         throwJavaException(env, "java/lang/IllegalArgumentException",
-                           "Cannot convert value %s to String", str);
-        JS_FreeCString(c->jsContext, str);
+                           "Cannot convert value %s to String",
+                           describeValue(c->jsContext, v).c_str());
       } else {
         result.l = c->toJavaString(env, v);
       }
@@ -747,10 +831,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
       jvalue result;
       if (!JS_IsNumber(v)) {
         result.l = nullptr;
-        const auto str = JS_ToCString(c->jsContext, v);
         throwJavaException(env, "java/lang/IllegalArgumentException",
-                           "Cannot convert value %s to double", str);
-        JS_FreeCString(c->jsContext, str);
+                           "Cannot convert value %s to double",
+                           describeValue(c->jsContext, v).c_str());
       } else if (JS_IsException(v)) {
         result.l = nullptr;
         c->throwJsException(env, v);
@@ -764,10 +847,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
       jvalue result;
       if (JS_VALUE_GET_TAG(v) != JS_TAG_INT) {
         result.l = nullptr;
-        const auto str = JS_ToCString(c->jsContext, v);
         throwJavaException(env, "java/lang/IllegalArgumentException",
-                           "Cannot convert value %s to int", str);
-        JS_FreeCString(c->jsContext, str);
+                           "Cannot convert value %s to int",
+                           describeValue(c->jsContext, v).c_str());
       } else if (JS_IsException(v)) {
         result.l = nullptr;
         c->throwJsException(env, v);
@@ -781,10 +863,9 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
       jvalue result;
       if (!JS_IsBool(v)) {
         result.l = nullptr;
-        const auto str = JS_ToCString(c->jsContext, v);
         throwJavaException(env, "java/lang/IllegalArgumentException",
-                           "Cannot convert value %s to boolean", str);
-        JS_FreeCString(c->jsContext, str);
+                           "Cannot convert value %s to boolean",
+                           describeValue(c->jsContext, v).c_str());
       } else if (JS_IsException(v)) {
         result.l = nullptr;
         c->throwJsException(env, v);
