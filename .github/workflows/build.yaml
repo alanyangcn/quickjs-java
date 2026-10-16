@@ -154,11 +154,15 @@ jobs:
           working-directory: quickjs-android
           script: |
             if [ -n "${{ matrix.page-size }}" ]; then test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = "${{ matrix.page-size }}"; fi
-            ./gradlew connectedDebugAndroidTest
+            ./gradlew connectedDebugAndroidTest :minify-test:connectedMinifiedAndroidTest
+            ../scripts/print-test-failures.py build/outputs/androidTest-results
+            ../scripts/print-test-failures.py minify-test/build/outputs/androidTest-results
 
       - name: Show failed tests
         if: failure()
-        run: scripts/print-test-failures.py quickjs-android/build/outputs/androidTest-results/connected
+        run: |
+          scripts/print-test-failures.py quickjs-android/build/outputs/androidTest-results || true
+          scripts/print-test-failures.py quickjs-android/minify-test/build/outputs/androidTest-results || true
 
       - uses: actions/upload-artifact@v7
         if: failure()
@@ -167,3 +171,5 @@ jobs:
           path: |
             quickjs-android/build/reports/androidTests/
             quickjs-android/build/outputs/androidTest-results/
+            quickjs-android/minify-test/build/reports/androidTests/
+            quickjs-android/minify-test/build/outputs/androidTest-results/

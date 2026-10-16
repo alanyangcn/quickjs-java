@@ -2,6 +2,7 @@ import java.util.Properties
 
 plugins {
   id("com.android.library") version "9.4.1"
+  id("com.android.application") version "9.4.1" apply false
   `maven-publish`
 }
 
@@ -20,6 +21,7 @@ android {
   defaultConfig {
     minSdk = 21
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    consumerProguardFiles("consumer-rules.pro")
     ndk {
       abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
     }

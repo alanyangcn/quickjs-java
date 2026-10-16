@@ -86,6 +86,22 @@ Log.d("Greeting", greeter.greet("world")); // Hello, world
 The interfaces passed to `set()` and `get()` must not extend other interfaces or overload
 methods. The examples in this file are kept working by `ReadmeExamplesTest`.
 
+### R8 and ProGuard
+
+JavaScript finds the methods of interfaces passed to `set()` and `get()` by name, so apps that
+shrink their code must keep those interfaces. Annotate them with `@Keep`:
+
+```java
+@Keep // androidx.annotation.Keep
+interface Greeter {
+  String greet(String name);
+}
+```
+
+Without it, R8 may rename the methods or merge the interface into its implementation, and calls
+fail with errors like `Only interfaces can be bound. Received: class q`. The library's own classes
+need no rules; its AAR includes them. `quickjs-android/minify-test` checks this with R8.
+
 ### Supported types
 
 The same types work in both directions: as parameters and return values of interfaces passed to

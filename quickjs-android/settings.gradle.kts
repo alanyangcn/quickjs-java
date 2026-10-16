@@ -15,3 +15,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "quickjs-android"
+
+// An app that uses the library with R8, to test the library's consumer rules.
+include(":minify-test")
