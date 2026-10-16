@@ -939,7 +939,9 @@ public final class QuickJsRegressionTest {
     quickjs.evaluate(
         "var js = { bounce: function(d) { return d == 0 ? 0 : 1 + java.bounce(d - 1); } };");
     javaScript[0] = quickjs.get("js", Bouncer.class);
-    assertThat(javaScript[0].bounce(20)).isEqualTo(20);
+    // QuickJS's stack limit also covers the Java and JNI frames between its own, which are large
+    // in Android debug builds: 20 bounces overflow 256 KiB on API 21.
+    assertThat(javaScript[0].bounce(6)).isEqualTo(6);
   }
 
   private static void assertConversionFails(String message, Runnable runnable) {
