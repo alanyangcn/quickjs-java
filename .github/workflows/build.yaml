@@ -7,113 +7,151 @@ on:
       - '**'
     tags-ignore:
       - '**'
+  workflow_call: {}
 
 env:
-  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false -Dkotlin.incremental=false"
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
 
 jobs:
-  jvm:
+  jvm-native:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - macOS-latest
-          - ubuntu-latest
-          # TODO: build on 'windows-latest'
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - os: macos-15
+            platform: darwin-aarch64
+          - os: macos-15-intel
+            platform: darwin-x86_64
 
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: gradle/wrapper-validation-action@v1
-      - uses: actions/setup-java@v2
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: 8
-
-      # Clang is seemingly already installed on Ubuntu but fails to build the project with errors
-      # like "file not found" for `#include <string>`. Explicitly (re?)installing fixes things.
-      - run: sudo apt-get install clang
-        if: matrix.os == 'ubuntu-latest'
+          distribution: 'temurin'
+          java-version: 21
 
       - name: Build native library
-        run: |
-          cmake -S quickjs/jvm/ -B build/jni/ -DQUICKJS_VERSION="$(cat quickjs/common/native/quickjs/VERSION)"
-          cmake --build build/jni/ --verbose
-          mkdir -p quickjs/jvm/src/main/resources/
-          cp -v build/jni/libquickjs.* quickjs/jvm/src/main/resources/
+        run: scripts/build-jvm-native.sh
 
+      # Runs the tests against this platform's library, with CheckJNI.
       - run: ./gradlew :quickjs:jvm:build
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
-          name: jvm-native-libraries
-          path: quickjs/jvm/src/main/resources/*
+          name: jvm-native-${{ matrix.platform }}
+          path: quickjs/jvm/src/main/resources/
+          if-no-files-found: error
+
+  jvm:
+    runs-on: ubuntu-24.04
+    needs: jvm-native
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 21
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jvm-native-*
+          path: quickjs/jvm/src/main/resources/
+          merge-multiple: true
+
+      - run: ./gradlew :quickjs:jvm:assemble :quickjs:jvm:generatePomFileForMavenPublication
+
+      - name: Check that the JAR contains every platform
+        run: |
+          jar=$(ls quickjs/jvm/build/libs/quickjs-jvm-*.jar | grep -v -e sources -e javadoc)
+          for platform in linux-x86_64/libquickjs.so linux-aarch64/libquickjs.so \
+              darwin-aarch64/libquickjs.dylib darwin-x86_64/libquickjs.dylib; do
+            unzip -l "$jar" | grep -q " $platform$" || { echo "Missing $platform in $jar"; exit 1; }
+          done
+          cp quickjs/jvm/build/publications/maven/pom-default.xml \
+            "quickjs/jvm/build/libs/$(basename "$jar" .jar).pom"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-jvm
+          path: quickjs/jvm/build/libs/
           if-no-files-found: error
 
   android:
-    # We build on a Mac to get hardware acceleration for the Android emulator.
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: gradle/wrapper-validation-action@v1
-      - uses: actions/setup-java@v2
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: 8
+          distribution: 'temurin'
+          java-version: 21
 
-      - run: ./gradlew :quickjs:android:build :quickjs:android:assembleAndroidTest
+      # `build` includes lint and the 16 KB alignment check of the release AAR.
+      - run: ./gradlew build assembleDebugAndroidTest generatePomFileForReleasePublication
+        working-directory: quickjs-android
+
+      - name: Check the test APK for 16 KB devices
+        run: scripts/check-elf-alignment.sh quickjs-android/build/outputs/apk/androidTest/debug/*.apk
+
+      - name: Collect release files
+        run: |
+          version=$(grep '^VERSION_NAME=' gradle.properties | cut -d= -f2)
+          mkdir -p build/android
+          cp quickjs-android/build/outputs/aar/quickjs-android-release.aar \
+            "build/android/quickjs-android-$version.aar"
+          cp quickjs-android/build/publications/release/pom-default.xml \
+            "build/android/quickjs-android-$version.pom"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-android
+          path: build/android/
+          if-no-files-found: error
+
+  android-device:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The minimum supported API level.
+          - api-level: 21
+            target: default
+            page-size: 4096
+          # A device with 16 KB pages.
+          - api-level: 35
+            target: google_apis_ps16k
+            page-size: 16384
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 21
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
       - uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 29
-          script: ./gradlew connectedCheck
-
-  publish:
-    runs-on: ubuntu-latest
-    needs:
-      - jvm
-      - android
-
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-java@v2
-        with:
-          distribution: 'zulu'
-          java-version: 8
-
-      - uses: actions/download-artifact@v2
-      - run: |
-          mkdir -p quickjs/jvm/src/main/resources/
-          cp -v jvm-native-libraries/* quickjs/jvm/src/main/resources/
-
-      - run: ./gradlew assemble javadoc
-
-      - uses: actions/upload-artifact@v2
-        with:
-          name: quickjs-jvm.jar
-          path: quickjs/jvm/build/libs/*.jar
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v2
-        with:
-          name: quickjs-android.aar
-          path: quickjs/android/build/outputs/aar/*-release.aar
-          if-no-files-found: error
-
-      - run: ./gradlew publish
-        if: ${{ github.ref == 'refs/heads/trunk' && github.repository == 'cashapp/quickjs-java' }}
-        env:
-          ORG_GRADLE_PROJECT_SONATYPE_NEXUS_USERNAME: ${{ secrets.SONATYPE_NEXUS_USERNAME }}
-          ORG_GRADLE_PROJECT_SONATYPE_NEXUS_PASSWORD: ${{ secrets.SONATYPE_NEXUS_PASSWORD }}
-
-      - name: Deploy docs to website
-        if: ${{ github.ref == 'refs/heads/trunk' && github.repository == 'cashapp/quickjs-java' }}
-        uses: JamesIves/github-pages-deploy-action@releases/v3
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: site
-          FOLDER: quickjs/jvm/build/docs/javadoc
-          TARGET_FOLDER: docs/latest/
-          CLEAN: true
+          api-level: ${{ matrix.api-level }}
+          target: ${{ matrix.target }}
+          arch: x86_64
+          working-directory: quickjs-android
+          script: |
+            test "$(adb shell getconf PAGE_SIZE | tr -d '\r')" = "${{ matrix.page-size }}"
+            ./gradlew connectedDebugAndroidTest

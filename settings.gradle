@@ -1,5 +1,5 @@
 rootProject.name = 'quickjs-root'
 
-include ':quickjs:android'
+// The JVM library. The Android library is built by the standalone project in quickjs-android/.
+// The original quickjs/android module and sample-octane are no longer built.
 include ':quickjs:jvm'
-include ':sample-octane'

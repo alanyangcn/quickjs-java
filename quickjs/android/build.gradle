@@ -1,3 +1,7 @@
+// No longer built: this module needs the Android Gradle Plugin 4.2 setup that the root project
+// dropped. The Android library is built by quickjs-android/, which still uses this directory's
+// CMakeLists.txt and src/main/java. Kept for reference only.
+
 apply plugin: 'com.android.library'
 apply plugin: 'com.vanniktech.maven.publish'
 

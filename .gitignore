@@ -10,3 +10,6 @@ reports
 jacoco.exec
 .externalNativeBuild
 .cxx
+
+# Built by scripts/build-jvm-native.sh
+quickjs/jvm/src/main/resources/

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.4.1)
+cmake_minimum_required(VERSION 3.10...3.31)
 project(quickjs LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 99)
@@ -13,7 +13,6 @@ if(DEFINED QUICKJS_VERSION)
 endif()
 
 # Keep every ELF LOAD segment compatible with Android's 16 KB page-size devices.
-# LINK_FLAGS also works with the original CMake 3.4.1 build entry point.
 set_property(TARGET quickjs APPEND_STRING PROPERTY LINK_FLAGS
   " -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")
 

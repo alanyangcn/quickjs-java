@@ -1,9 +1,25 @@
-apply plugin: 'java-library'
-apply plugin: 'com.vanniktech.maven.publish'
+plugins {
+  id 'java-library'
+  id 'maven-publish'
+}
+
+group = GROUP
+version = VERSION_NAME
+base.archivesName = POM_ARTIFACT_ID
 
 java {
-  sourceCompatibility = JavaVersion.VERSION_1_8
-  targetCompatibility = JavaVersion.VERSION_1_8
+  withSourcesJar()
+  withJavadocJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+  options.release = 8
+  // Building for Java 8 with a newer JDK warns that the release is obsolete.
+  options.compilerArgs += ['-Xlint:-options']
+}
+
+tasks.withType(Javadoc).configureEach {
+  options.addBooleanOption('Xdoclint:none', true)
 }
 
 sourceSets {
@@ -16,4 +32,70 @@ dependencies {
 
   testImplementation deps.junit
   testImplementation deps.truth
+}
+
+// The native libraries are built outside Gradle by scripts/build-jvm-native.sh, once per
+// platform, into src/main/resources/<os>-<arch>/.
+def nativeLibraries = fileTree('src/main/resources') { include '*/libquickjs.*' }
+
+tasks.named('processResources') {
+  doFirst {
+    if (nativeLibraries.isEmpty()) {
+      throw new GradleException(
+          'No native libraries in quickjs/jvm/src/main/resources. Run scripts/build-jvm-native.sh first.')
+    }
+  }
+}
+
+// Fail the build if CheckJNI finds problems in the bridge. HotSpot prints its warnings straight to
+// the process's stdout, which Gradle doesn't attribute to tests, so log VM output to a file.
+def vmLog = layout.buildDirectory.file('check-jni/vm.log')
+tasks.named('test', Test) {
+  jvmArgs '-Xcheck:jni', '-XX:+UnlockDiagnosticVMOptions', '-XX:+LogVMOutput',
+      "-XX:LogFile=${vmLog.get().asFile}"
+  doFirst {
+    vmLog.get().asFile.parentFile.mkdirs()
+    vmLog.get().asFile.delete()
+  }
+  doLast {
+    def log = vmLog.get().asFile
+    def warnings = log.exists() ? log.readLines().findAll { it.contains('WARNING in native method') } : []
+    if (!warnings.isEmpty()) {
+      throw new GradleException("CheckJNI reported ${warnings.size()} warning(s); see ${log}:\n" +
+          warnings.unique().join('\n'))
+    }
+  }
+}
+
+publishing {
+  publications {
+    register('maven', MavenPublication) {
+      artifactId = POM_ARTIFACT_ID
+      from components.java
+      pom {
+        name = POM_NAME
+        description = POM_DESCRIPTION
+        url = POM_URL
+        licenses {
+          license {
+            name = POM_LICENCE_NAME
+            url = POM_LICENCE_URL
+            distribution = POM_LICENCE_DIST
+          }
+        }
+        scm {
+          url = POM_SCM_URL
+          connection = POM_SCM_CONNECTION
+          developerConnection = POM_SCM_DEV_CONNECTION
+        }
+        developers {
+          developer {
+            id = POM_DEVELOPER_ID
+            name = POM_DEVELOPER_NAME
+            url = POM_DEVELOPER_URL
+          }
+        }
+      }
+    }
+  }
 }
