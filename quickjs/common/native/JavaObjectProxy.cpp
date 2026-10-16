@@ -15,6 +15,7 @@
  */
 #include "JavaObjectProxy.h"
 #include <cstdlib>
+#include <cstring>
 #include "Context.h"
 #include "ExceptionThrowers.h"
 #include "JavaMethodProxy.h"
@@ -36,13 +37,23 @@ JavaObjectProxy::JavaObjectProxy(Context* c, JNIEnv* env, const char* name, jobj
       break;
     }
     const auto& proxyMethod = proxies.back();
-    const auto functionName = strdup(proxyMethod.name.c_str());
+    // Freed with std::free() in the destructor. strdup() isn't standard C++.
+    const auto functionName = static_cast<char*>(std::malloc(proxyMethod.name.size() + 1));
     if (!functionName) {
       throwJavaException(env, "java/lang/OutOfMemoryError", "Cannot allocate method name");
       break;
     }
-    f[i] = JS_CFUNC_MAGIC_DEF(functionName, static_cast<uint8_t>(proxyMethod.numArgs()),
-                              Context::jsCall, static_cast<short>(i));
+    std::memcpy(functionName, proxyMethod.name.c_str(), proxyMethod.name.size() + 1);
+    // What JS_CFUNC_MAGIC_DEF() expands to, without its C99 designated initializers, which
+    // aren't valid C++11.
+    JSCFunctionListEntry& entry = f[i];
+    entry.name = functionName;
+    entry.prop_flags = JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE;
+    entry.def_type = JS_DEF_CFUNC;
+    entry.magic = static_cast<int16_t>(i);
+    entry.u.func.length = static_cast<uint8_t>(proxyMethod.numArgs());
+    entry.u.func.cproto = JS_CFUNC_generic_magic;
+    entry.u.func.cfunc.generic_magic = Context::jsCall;
   }
 
   if (!env->ExceptionCheck()) {

@@ -10,7 +10,7 @@ jobs:
   check-version:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: scripts/check-release-version.sh "${{ github.ref_name }}"
 
   build:
@@ -24,9 +24,9 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: quickjs-*
           path: release/
@@ -37,11 +37,11 @@ jobs:
           scripts/check-release-version.sh "${{ github.ref_name }}" release/
           (cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS)
 
-      - uses: ffurrer2/extract-release-notes@v2
+      - uses: ffurrer2/extract-release-notes@v3
         id: release_notes
 
       # A draft, so the release can be reviewed before it is published.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           draft: true
           body: ${{ steps.release_notes.outputs.release_notes }}

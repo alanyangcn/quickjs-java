@@ -30,9 +30,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: gradle/actions/wrapper-validation@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: gradle/actions/wrapper-validation@v6
+      - uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: 21
@@ -43,7 +43,7 @@ jobs:
       # Runs the tests against this platform's library, with CheckJNI.
       - run: ./gradlew :quickjs:jvm:build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jvm-native-${{ matrix.platform }}
           path: quickjs/jvm/src/main/resources/
@@ -54,13 +54,13 @@ jobs:
     needs: jvm-native
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: 21
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: jvm-native-*
           path: quickjs/jvm/src/main/resources/
@@ -78,7 +78,7 @@ jobs:
           cp quickjs/jvm/build/publications/maven/pom-default.xml \
             "quickjs/jvm/build/libs/$(basename "$jar" .jar).pom"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: quickjs-jvm
           path: quickjs/jvm/build/libs/
@@ -88,9 +88,9 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: gradle/actions/wrapper-validation@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: gradle/actions/wrapper-validation@v6
+      - uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: 21
@@ -111,7 +111,7 @@ jobs:
           cp quickjs-android/build/publications/release/pom-default.xml \
             "build/android/quickjs-android-$version.pom"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: quickjs-android
           path: build/android/
@@ -134,8 +134,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: 21
