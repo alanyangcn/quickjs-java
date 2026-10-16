@@ -51,7 +51,8 @@ jobs:
 
   # Runs the JVM tests against a native library built with AddressSanitizer and
   # UndefinedBehaviorSanitizer. Undefined behavior in the bridge fails the tests. QuickJS itself
-  # shifts negative numbers by design, so its C code is checked for everything else.
+  # shifts negative numbers and calls its allocators through compatible but differently declared
+  # function pointers by design, so its C code is checked for everything else.
   jvm-sanitizers:
     runs-on: ubuntu-24.04
 
@@ -70,7 +71,7 @@ jobs:
         run: |
           scripts/build-jvm-native.sh \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize=shift -fno-omit-frame-pointer" \
+            "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize=shift,function -fno-omit-frame-pointer" \
             "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" \
             "-DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=address,undefined -shared-libasan"
 
