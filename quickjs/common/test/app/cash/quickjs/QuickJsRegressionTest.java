@@ -400,18 +400,28 @@ public final class QuickJsRegressionTest {
   }
 
   @Test public void totalArrayElementsAreBounded() {
-    // Shared sub-arrays are converted once per reference, so 2048 references to one array of 2048
-    // elements is more than 4194304 elements in total.
+    // Each array's length counts when it is entered, before its elements are converted, so the
+    // large hole-filled arrays below fail without converting any of their elements.
     try {
-      quickjs.evaluate("var x = new Array(2048).fill(1); new Array(2048).fill(x)");
+      // 1 + 4194304: the inner array alone is within the single array limit.
+      quickjs.evaluate("[new Array(4194304)]");
       fail();
     } catch (IllegalArgumentException e) {
       assertThat(e).hasMessageThat()
           .isEqualTo("Cannot marshal more than 4194304 JavaScript array elements to Java");
     }
-    Object[] result = (Object[]) quickjs.evaluate(
-        "var x = new Array(2048).fill(1); new Array(2047).fill(x)");
-    assertThat(result).hasLength(2047);
+    try {
+      // Shared sub-arrays are converted once per reference: 3 + 2 + 2 + 4194299 = 4194306, where
+      // counting x once would be exactly 4194304.
+      quickjs.evaluate("var x = [1, 2]; [x, x, new Array(4194299)]");
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat()
+          .isEqualTo("Cannot marshal more than 4194304 JavaScript array elements to Java");
+    }
+    // The count starts over for each conversion, so the near-limit count above is not carried over.
+    Object[] result = (Object[]) quickjs.evaluate("var x = [1, 2]; [x, x]");
+    assertThat(result).hasLength(2);
   }
 
   // R08: exceptions thrown by getters are reported as they are.
