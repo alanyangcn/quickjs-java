@@ -27,20 +27,14 @@ import static java.util.Locale.US;
 final class QuickJsNativeLoader {
   @SuppressWarnings("UnsafeDynamicallyLoadedCode") // Only loading from our own JAR contents.
   static void load() {
-    String osName = System.getProperty("os.name").toLowerCase(US);
-
-    String nativeLibraryJarPath;
-    if (osName.contains("linux")) {
-      nativeLibraryJarPath = "/libquickjs.so";
-    } else if (osName.contains("mac")) {
-      nativeLibraryJarPath = "/libquickjs.dylib";
-    } else {
-      throw new IllegalStateException("Unsupported OS: " + osName);
-    }
+    String nativeLibraryJarPath = nativeLibraryJarPath(
+        System.getProperty("os.name"), System.getProperty("os.arch"));
 
     URL nativeLibraryUrl = QuickJsNativeLoader.class.getResource(nativeLibraryJarPath);
     if (nativeLibraryUrl == null) {
-      throw new IllegalStateException("Unable to read " + nativeLibraryJarPath + " from JAR");
+      throw new IllegalStateException("Unable to read " + nativeLibraryJarPath + " from JAR. "
+          + "This JAR doesn't support " + System.getProperty("os.name") + " on "
+          + System.getProperty("os.arch") + ".");
     }
 
     Path nativeLibraryFile;
@@ -58,5 +52,31 @@ final class QuickJsNativeLoader {
     }
 
     System.load(nativeLibraryFile.toAbsolutePath().toString());
+  }
+
+  /** Returns a path like {@code /darwin-aarch64/libquickjs.dylib}. */
+  static String nativeLibraryJarPath(String osName, String osArch) {
+    String os = osName.toLowerCase(US);
+    String fileName;
+    if (os.contains("linux")) {
+      os = "linux";
+      fileName = "libquickjs.so";
+    } else if (os.contains("mac")) {
+      os = "darwin";
+      fileName = "libquickjs.dylib";
+    } else {
+      throw new IllegalStateException("Unsupported OS: " + osName);
+    }
+
+    String arch = osArch.toLowerCase(US);
+    if (arch.equals("amd64") || arch.equals("x86_64")) {
+      arch = "x86_64";
+    } else if (arch.equals("aarch64") || arch.equals("arm64")) {
+      arch = "aarch64";
+    } else {
+      throw new IllegalStateException("Unsupported architecture: " + osArch + " on " + osName);
+    }
+
+    return "/" + os + "-" + arch + "/" + fileName;
   }
 }

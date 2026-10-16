@@ -31,10 +31,18 @@ JavaObjectProxy::JavaObjectProxy(Context* c, JNIEnv* env, const char* name, jobj
       break;
     }
     proxies.emplace_back(context, env, method);
-    const auto& proxyMethod = proxies.back();
-    f[i] = JS_CFUNC_MAGIC_DEF(strdup(proxyMethod.name.c_str()), static_cast<uint8_t>(proxyMethod.numArgs()),
-                              Context::jsCall, static_cast<short>(i));
     env->DeleteLocalRef(method);
+    if (env->ExceptionCheck()) {
+      break;
+    }
+    const auto& proxyMethod = proxies.back();
+    const auto functionName = strdup(proxyMethod.name.c_str());
+    if (!functionName) {
+      throwJavaException(env, "java/lang/OutOfMemoryError", "Cannot allocate method name");
+      break;
+    }
+    f[i] = JS_CFUNC_MAGIC_DEF(functionName, static_cast<uint8_t>(proxyMethod.numArgs()),
+                              Context::jsCall, static_cast<short>(i));
   }
 
   if (!env->ExceptionCheck()) {

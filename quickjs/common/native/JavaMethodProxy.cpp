@@ -16,6 +16,7 @@
 #include "JavaMethodProxy.h"
 #include <algorithm>
 #include <string>
+#include <vector>
 #include "Context.h"
 #include "ExceptionThrowers.h"
 
@@ -143,7 +144,7 @@ JavaMethodProxy::invoke(Context* context, jobject javaThis, int argc, JSValueCon
   if (env->PushLocalFrame(argc + 1) < 0) {
     return context->throwJavaExceptionFromJs(env);
   }
-  jvalue args[argumentLoaders.size()];
+  std::vector<jvalue> args(argumentLoaders.size());
   for (int i = 0; i < minArgs; i++) {
     args[i] = argumentLoaders[i](context, env, argv[i]);
     if (env->ExceptionCheck()) {
@@ -165,7 +166,7 @@ JavaMethodProxy::invoke(Context* context, jobject javaThis, int argc, JSValueCon
     }
   }
 
-  auto result = javaCaller(context, env, javaThis, args);
+  auto result = javaCaller(context, env, javaThis, args.data());
   if (env->ExceptionCheck()) {
     JS_FreeValue(context->jsContext, result);
     result = context->throwJavaExceptionFromJs(env);

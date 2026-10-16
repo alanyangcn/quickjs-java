@@ -19,6 +19,43 @@
 #include "JsObjectProxy.h"
 #include "ExceptionThrowers.h"
 
+namespace {
+
+Context* getContext(JNIEnv* env, jlong context) {
+  if (!context) {
+    throwJavaException(env, "java/lang/NullPointerException",
+                       "Null QuickJs context - did you close your QuickJs?");
+  }
+  return reinterpret_cast<Context*>(context);
+}
+
+/*
+ * Tracks native calls into a context. The outermost call records the current thread's stack top,
+ * so QuickJS's stack limit applies to whichever thread is using the engine, and clears state left
+ * over from an interrupted call.
+ */
+class CallScope {
+public:
+  explicit CallScope(JNIEnv* env, Context* context) : env(env), context(context) {
+    if (context->nativeCallDepth++ == 0) {
+      JS_UpdateStackTop(context->jsRuntime);
+    }
+  }
+
+  ~CallScope() {
+    if (--context->nativeCallDepth == 0 && context->interruptCause) {
+      env->DeleteGlobalRef(context->interruptCause);
+      context->interruptCause = nullptr;
+    }
+  }
+
+private:
+  JNIEnv* const env;
+  Context* const context;
+};
+
+} // anonymous namespace
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_app_cash_quickjs_QuickJs_createContext(JNIEnv* env, jclass type) {
   Context* c = new(std::nothrow) Context(env);
@@ -40,49 +77,35 @@ Java_app_cash_quickjs_QuickJs_evaluate__JLjava_lang_String_2Ljava_lang_String_2(
                                                                                     jlong context_,
                                                                                     jstring sourceCode,
                                                                                     jstring fileName) {
-  Context* context = reinterpret_cast<Context*>(context_);
-  if (!context) {
-    throwJavaException(env, "java/lang/NullPointerException",
-                       "Null QuickJs context - did you close your QuickJs?");
-    return nullptr;
-  }
+  Context* context = getContext(env, context_);
+  if (!context) return nullptr;
+  CallScope scope(env, context);
   return context->eval(env, sourceCode, fileName);
 }
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_app_cash_quickjs_QuickJs_get(JNIEnv* env, jobject thiz, jlong _context, jstring name,
                                       jobjectArray methods) {
-  Context* context = reinterpret_cast<Context*>(_context);
-  if (!context) {
-    throwJavaException(env, "java/lang/NullPointerException",
-                       "Null QuickJs context - did you close your QuickJs?");
-    return 0L;
-  }
-
+  Context* context = getContext(env, _context);
+  if (!context) return 0L;
+  CallScope scope(env, context);
   return reinterpret_cast<jlong>(context->getObjectProxy(env, name, methods));
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_app_cash_quickjs_QuickJs_set(JNIEnv* env, jobject thiz, jlong _context, jstring name,
                                       jobject object, jobjectArray methods) {
-  Context* context = reinterpret_cast<Context*>(_context);
-  if (!context) {
-    throwJavaException(env, "java/lang/NullPointerException",
-                       "Null QuickJs context - did you close your QuickJs?");
-    return;
-  }
+  Context* context = getContext(env, _context);
+  if (!context) return;
+  CallScope scope(env, context);
   context->setObjectProxy(env, name, object, methods);
 }
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_app_cash_quickjs_QuickJs_call(JNIEnv* env, jobject thiz, jlong _context, jlong instance,
-                                       jobject method, jobjectArray args) {
-  Context* context = reinterpret_cast<Context*>(_context);
-  if (!context) {
-    throwJavaException(env, "java/lang/NullPointerException",
-                       "Null QuickJs context - did you close your QuickJs?");
-    return nullptr;
-  }
+                                       jint methodIndex, jobjectArray args) {
+  Context* context = getContext(env, _context);
+  if (!context) return nullptr;
 
   const JsObjectProxy* jsObjectProxy = reinterpret_cast<const JsObjectProxy*>(instance);
   if (!jsObjectProxy) {
@@ -90,25 +113,55 @@ Java_app_cash_quickjs_QuickJs_call(JNIEnv* env, jobject thiz, jlong _context, jl
     return nullptr;
   }
 
-  return jsObjectProxy->call(context, env, method, args);
+  CallScope scope(env, context);
+  return jsObjectProxy->call(context, env, methodIndex, args);
 }
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_app_cash_quickjs_QuickJs_execute(JNIEnv* env, jobject thiz, jlong _context, jbyteArray bytecode) {
-  Context* context = reinterpret_cast<Context*>(_context);
-  if (!context) {
-    throwJavaException(env, "java/lang/NullPointerException", "Null QuickJs context - did you close your QuickJs?");
-    return nullptr;
-  }
+  Context* context = getContext(env, _context);
+  if (!context) return nullptr;
+  CallScope scope(env, context);
   return context->execute(env, bytecode);
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_app_cash_quickjs_QuickJs_compile(JNIEnv* env, jobject thiz, jlong _context, jstring sourceCode, jstring fileName) {
-  Context* context = reinterpret_cast<Context*>(_context);
-  if (!context) {
-    throwJavaException(env, "java/lang/NullPointerException", "Null QuickJs context - did you close your QuickJs?");
-    return nullptr;
-  }
+  Context* context = getContext(env, _context);
+  if (!context) return nullptr;
+  CallScope scope(env, context);
   return context->compile(env, sourceCode, fileName);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_app_cash_quickjs_QuickJs_executePendingJobs(JNIEnv* env, jobject thiz, jlong _context,
+                                                 jint maxJobs) {
+  Context* context = getContext(env, _context);
+  if (!context) return 0;
+  CallScope scope(env, context);
+  return context->executePendingJobs(env, maxJobs);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_cash_quickjs_QuickJs_setMemoryLimit(JNIEnv* env, jobject thiz, jlong _context,
+                                             jlong limit) {
+  Context* context = getContext(env, _context);
+  if (!context) return;
+  JS_SetMemoryLimit(context->jsRuntime, limit > 0 ? static_cast<size_t>(limit) : static_cast<size_t>(-1));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_cash_quickjs_QuickJs_setMaxStackSize(JNIEnv* env, jobject thiz, jlong _context,
+                                              jlong size) {
+  Context* context = getContext(env, _context);
+  if (!context) return;
+  JS_SetMaxStackSize(context->jsRuntime, static_cast<size_t>(size));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_app_cash_quickjs_QuickJs_setInterruptHandler(JNIEnv* env, jobject thiz, jlong _context,
+                                                  jobject handler) {
+  Context* context = getContext(env, _context);
+  if (!context) return;
+  context->setInterruptHandler(env, handler);
 }

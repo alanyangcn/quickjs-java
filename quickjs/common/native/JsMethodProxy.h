@@ -26,13 +26,17 @@ class Context;
 
 class JsMethodProxy {
 public:
-  JsMethodProxy(Context* context, JNIEnv*, const char* name, jobject method);
+  // Takes ownership of `atom`, the JavaScript property name.
+  JsMethodProxy(Context* context, JNIEnv*, const std::string& name, JSAtom atom, jobject method);
+  ~JsMethodProxy();
 
   jobject call(Context *context, JNIEnv*, JSValue thisPointer, jobjectArray pArray) const;
 
   const std::string name;
   const jmethodID methodId;
 private:
+  JSContext* const jsContext;
+  const JSAtom atom;
   std::vector<std::function<JSValueConst(Context*, JNIEnv*, jvalue)>> argumentLoaders;
   std::function<jvalue(Context*, JNIEnv*, const JSValueConst&)> resultLoader;
   // Set for int, double and boolean: JavaScript must not return null or undefined.

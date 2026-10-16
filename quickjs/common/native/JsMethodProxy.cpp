@@ -19,8 +19,10 @@
 #include "Context.h"
 #include "ExceptionThrowers.h"
 
-JsMethodProxy::JsMethodProxy(Context* context, JNIEnv* env, const char* name, jobject method)
-    : name(name), methodId(env->FromReflectedMethod(method)), isVarArgs(false) {
+JsMethodProxy::JsMethodProxy(Context* context, JNIEnv* env, const std::string& name, JSAtom atom,
+                             jobject method)
+    : name(name), methodId(env->FromReflectedMethod(method)), jsContext(context->jsContext),
+      atom(atom), isVarArgs(false) {
   const jclass methodClass = env->GetObjectClass(method);
 
   const jmethodID getReturnType =
@@ -65,6 +67,10 @@ JsMethodProxy::JsMethodProxy(Context* context, JNIEnv* env, const char* name, jo
   env->DeleteLocalRef(methodClass);
 }
 
+JsMethodProxy::~JsMethodProxy() {
+  JS_FreeAtom(jsContext, atom);
+}
+
 jobject JsMethodProxy::call(Context* context, JNIEnv* env, JSValue thisPointer, jobjectArray args) const {
   const auto totalArgs = std::min<int>(argumentLoaders.size(), args ? env->GetArrayLength(args) : 0);
   std::vector<JSValue> arguments;
@@ -100,10 +106,8 @@ jobject JsMethodProxy::call(Context* context, JNIEnv* env, JSValue thisPointer, 
     context->throwJsException(env, JS_EXCEPTION);
     result = nullptr;
   } else if (!env->ExceptionCheck()) {
-    auto property = JS_NewAtom(context->jsContext, name.c_str());
-    JSValue callResult = JS_Invoke(context->jsContext, thisPointer, property, arguments.size(),
+    JSValue callResult = JS_Invoke(context->jsContext, thisPointer, atom, arguments.size(),
                                    arguments.data());
-    JS_FreeAtom(context->jsContext, property);
     result = resultLoader(context, env, callResult).l;
     if (!result && !env->ExceptionCheck() && !primitiveReturnType.empty()) {
       // The Java proxy would otherwise fail to unbox null with an unrelated NullPointerException.

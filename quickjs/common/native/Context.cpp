@@ -26,24 +26,42 @@
 #include "ExceptionThrowers.h"
 #include "quickjs/quickjs.h"
 
-std::string getName(JNIEnv* env, jobject javaClass) {
-  auto classType = env->GetObjectClass(javaClass);
+/*
+ * Converts `string` to standard UTF-8 without a Context, for use while building proxies.
+ * GetStringUTFChars() would return modified UTF-8.
+ */
+static std::string javaStringToUtf8(JNIEnv* env, jstring string) {
+  jclass stringClass = env->GetObjectClass(string);
+  const jmethodID getBytes = env->GetMethodID(stringClass, "getBytes", "(Ljava/lang/String;)[B");
+  env->DeleteLocalRef(stringClass);
+  jstring charsetName = getBytes ? env->NewStringUTF("UTF-8") : nullptr;
+  auto bytes = charsetName
+      ? static_cast<jbyteArray>(env->CallObjectMethod(string, getBytes, charsetName))
+      : nullptr;
+  std::string result;
+  if (bytes && !env->ExceptionCheck()) {
+    const jsize length = env->GetArrayLength(bytes);
+    if (length > 0) {
+      result.resize(length);
+      env->GetByteArrayRegion(bytes, 0, length, reinterpret_cast<jbyte*>(&result[0]));
+    }
+  }
+  env->DeleteLocalRef(bytes);
+  env->DeleteLocalRef(charsetName);
+  return result;
+}
+
+std::string getName(JNIEnv* env, jobject object) {
+  auto classType = env->GetObjectClass(object);
   const jmethodID method = env->GetMethodID(classType, "getName", "()Ljava/lang/String;");
   env->DeleteLocalRef(classType);
   if (!method) return {};
-  auto javaString = static_cast<jstring>(env->CallObjectMethod(javaClass, method));
+  auto javaString = static_cast<jstring>(env->CallObjectMethod(object, method));
   if (env->ExceptionCheck() || !javaString) {
     env->DeleteLocalRef(javaString);
     return {};
   }
-  const auto s = env->GetStringUTFChars(javaString, nullptr);
-  if (!s) {
-    env->DeleteLocalRef(javaString);
-    return {};
-  }
-
-  std::string str(s);
-  env->ReleaseStringUTFChars(javaString, s);
+  std::string str = javaStringToUtf8(env, javaString);
   env->DeleteLocalRef(javaString);
   return str;
 }
@@ -218,6 +236,11 @@ Context::~Context() {
   for (auto refs : globalReferences) {
     env->DeleteGlobalRef(refs.second);
   }
+  for (auto& entry : objectConverters) {
+    env->DeleteGlobalRef(entry.first);
+  }
+  env->DeleteGlobalRef(interruptHandler);
+  env->DeleteGlobalRef(interruptCause);
   env->DeleteGlobalRef(quickJsExceptionClass);
   env->DeleteGlobalRef(stringUtf8);
   env->DeleteGlobalRef(stringClass);
@@ -269,18 +292,14 @@ jbyteArray Context::compile(JNIEnv* env, jstring source, jstring file) {
                        source ? "fileName == null" : "sourceCode == null");
     return nullptr;
   }
-  const auto sourceCode = env->GetStringUTFChars(source, 0);
-  if (!sourceCode) return nullptr;
-  const auto fileName = env->GetStringUTFChars(file, 0);
-  if (!fileName) {
-    env->ReleaseStringUTFChars(source, sourceCode);
-    return nullptr;
-  }
+  // Same encoding as eval(): standard UTF-8, which also keeps embedded NUL characters.
+  const std::string sourceCode = toCppString(env, source);
+  if (env->ExceptionCheck()) return nullptr;
+  const std::string fileName = toCppString(env, file);
+  if (env->ExceptionCheck()) return nullptr;
 
-  auto compiled = JS_Eval(jsContext, sourceCode, strlen(sourceCode), fileName, JS_EVAL_FLAG_COMPILE_ONLY);
-
-  env->ReleaseStringUTFChars(file, fileName);
-  env->ReleaseStringUTFChars(source, sourceCode);
+  auto compiled = JS_Eval(jsContext, sourceCode.c_str(), sourceCode.length(), fileName.c_str(),
+                          JS_EVAL_FLAG_COMPILE_ONLY);
 
   if (JS_IsException(compiled)) {
     // TODO: figure out how to get the failing line number into the exception.
@@ -290,15 +309,22 @@ jbyteArray Context::compile(JNIEnv* env, jstring source, jstring file) {
 
   size_t bufferLength = 0;
   auto buffer = JS_WriteObject(jsContext, &bufferLength, compiled, JS_WRITE_OBJ_BYTECODE | JS_WRITE_OBJ_REFERENCE);
-
-  auto result = buffer && bufferLength > 0 ? env->NewByteArray(bufferLength) : nullptr;
-  if (result) {
-    env->SetByteArrayRegion(result, 0, bufferLength, reinterpret_cast<const jbyte*>(buffer));
-  } else {
-    throwJsException(env, compiled);
+  JS_FreeValue(jsContext, compiled);
+  if (!buffer) {
+    // JS_WriteObject() fails on allocation failure or an unserializable value.
+    throwJsException(env, JS_EXCEPTION);
+    return nullptr;
   }
 
-  JS_FreeValue(jsContext, compiled);
+  jbyteArray result = nullptr;
+  if (bufferLength > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
+    throwJavaException(env, "java/lang/OutOfMemoryError", "Bytecode exceeds Java array size");
+  } else {
+    result = env->NewByteArray(bufferLength);
+    if (result) {
+      env->SetByteArrayRegion(result, 0, bufferLength, reinterpret_cast<const jbyte*>(buffer));
+    }
+  }
   js_free(jsContext, buffer);
 
   return result;
@@ -309,16 +335,23 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
     throwJavaException(env, "java/lang/NullPointerException", "name == null");
     return nullptr;
   }
-  const char* nameStr = env->GetStringUTFChars(name, 0);
-  if (!nameStr) return nullptr;
+  const std::string nameString = toCppString(env, name);
+  if (env->ExceptionCheck()) return nullptr;
+  const char* nameStr = nameString.c_str();
+  const JSAtom nameAtom = JS_NewAtomLen(jsContext, nameString.data(), nameString.size());
+  if (nameAtom == JS_ATOM_NULL) {
+    throwJsException(env, JS_EXCEPTION);
+    return nullptr;
+  }
 
   JSValue global = JS_GetGlobalObject(jsContext);
-
-  JSValue obj = JS_GetPropertyStr(jsContext, global, nameStr);
+  JSValue obj = JS_GetProperty(jsContext, global, nameAtom);
+  JS_FreeValue(jsContext, global);
 
   JsObjectProxy* jsObjectProxy = nullptr;
   if (JS_IsObject(obj)) {
-    jsObjectProxy = new JsObjectProxy(nameStr);
+    // The proxy owns its own reference to the atom.
+    jsObjectProxy = new JsObjectProxy(this, nameString, JS_DupAtom(jsContext, nameAtom));
     jsize numMethods = env->GetArrayLength(methods);
     for (int i = 0; i < numMethods && !env->ExceptionCheck(); ++i) {
       jobject method = env->GetObjectArrayElement(methods, i);
@@ -330,11 +363,16 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
       }
       const char* methodNameStr = methodNameString.c_str();
 
-      JSValue prop = JS_GetPropertyStr(jsContext, obj, methodNameStr);
+      const JSAtom methodAtom =
+          JS_NewAtomLen(jsContext, methodNameString.data(), methodNameString.size());
+      JSValue prop = methodAtom == JS_ATOM_NULL
+          ? JS_EXCEPTION
+          : JS_GetProperty(jsContext, obj, methodAtom);
       if (JS_IsException(prop)) {
         throwJsException(env, prop);
       } else if (JS_IsFunction(jsContext, prop)) {
-        jsObjectProxy->methods.push_back(new JsMethodProxy(this, env, methodNameStr, method));
+        jsObjectProxy->methods.push_back(
+            new JsMethodProxy(this, env, methodNameString, JS_DupAtom(jsContext, methodAtom), method));
       } else {
         const char* msg = JS_IsUndefined(prop)
                           ? "JavaScript global %s has no method called %s"
@@ -342,13 +380,25 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
         throwJsExceptionFmt(env, this, msg, nameStr, methodNameStr);
       }
       JS_FreeValue(jsContext, prop);
+      if (methodAtom != JS_ATOM_NULL) JS_FreeAtom(jsContext, methodAtom);
       env->DeleteLocalRef(method);
     }
-    if (!env->ExceptionCheck()) {
-      objectProxies.push_back(jsObjectProxy);
-    } else {
+    if (env->ExceptionCheck()) {
       delete jsObjectProxy;
       jsObjectProxy = nullptr;
+    } else {
+      // Proxies look up the global by name on each call, so an equivalent proxy can be shared.
+      for (auto existing : objectProxies) {
+        if (existing->hasSameMethods(*jsObjectProxy)) {
+          delete jsObjectProxy;
+          jsObjectProxy = existing;
+          break;
+        }
+      }
+      if (std::find(objectProxies.begin(), objectProxies.end(), jsObjectProxy)
+          == objectProxies.end()) {
+        objectProxies.push_back(jsObjectProxy);
+      }
     }
   } else if (JS_IsException(obj)) {
     throwJsException(env, obj);
@@ -360,9 +410,7 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
   }
 
   JS_FreeValue(jsContext, obj);
-
-  env->ReleaseStringUTFChars(name, nameStr);
-  JS_FreeValue(jsContext, global);
+  JS_FreeAtom(jsContext, nameAtom);
 
   return jsObjectProxy;
 }
@@ -373,13 +421,24 @@ void Context::setObjectProxy(JNIEnv* env, jstring name, jobject object, jobjectA
                        name ? "object == null" : "name == null");
     return;
   }
-  const char* nameStr = env->GetStringUTFChars(name, 0);
-  if (!nameStr) return;
+  const std::string nameString = toCppString(env, name);
+  if (env->ExceptionCheck()) return;
+  const char* nameStr = nameString.c_str();
 
+  const auto objName = JS_NewAtomLen(jsContext, nameString.data(), nameString.size());
+  if (objName == JS_ATOM_NULL) {
+    throwJsException(env, JS_EXCEPTION);
+    return;
+  }
   auto global = JS_GetGlobalObject(jsContext);
 
-  const auto objName = JS_NewAtom(jsContext, nameStr);
-  if (!JS_HasProperty(jsContext, global, objName)) {
+  const int hasProperty = JS_HasProperty(jsContext, global, objName);
+  if (hasProperty < 0) {
+    throwJsException(env, JS_EXCEPTION);
+  } else if (hasProperty) {
+    throwJavaException(env, "java/lang/IllegalArgumentException",
+                       "A global object called %s already exists", nameStr);
+  } else {
     if (jsClassId == 0) {
       JS_NewClassID(&jsClassId);
       JSClassDef classDef;
@@ -388,7 +447,7 @@ void Context::setObjectProxy(JNIEnv* env, jstring name, jobject object, jobjectA
       classDef.finalizer = jsFinalize;
       if (JS_NewClass(jsRuntime, jsClassId, &classDef)) {
         jsClassId = 0;
-        throwJavaException(env, "java/lang/NullPointerException",
+        throwJavaException(env, "java/lang/OutOfMemoryError",
                            "Failed to allocate JavaScript proxy class");
       }
     }
@@ -411,13 +470,63 @@ void Context::setObjectProxy(JNIEnv* env, jstring name, jobject object, jobjectA
         }
       }
     }
-  } else {
-    throwJavaException(env, "java/lang/IllegalArgumentException",
-                       "A global object called %s already exists", nameStr);
   }
   JS_FreeAtom(jsContext, objName);
-  env->ReleaseStringUTFChars(name, nameStr);
   JS_FreeValue(jsContext, global);
+}
+
+namespace {
+
+int pollInterruptHandler(JSRuntime*, void* opaque) {
+  auto context = static_cast<Context*>(opaque);
+  if (!context->interruptHandler || context->interruptCause) return 0;
+  JNIEnv* env = context->getEnv();
+  if (env->ExceptionCheck()) return 0; // Never call into Java with an exception pending.
+  const jboolean interrupt =
+      env->CallBooleanMethod(context->interruptHandler, context->interruptHandlerPoll);
+  if (env->ExceptionCheck()) {
+    // JavaScript can't carry this exception; throwJsException() rethrows it instead.
+    jthrowable exception = env->ExceptionOccurred();
+    env->ExceptionClear();
+    context->interruptCause = static_cast<jthrowable>(env->NewGlobalRef(exception));
+    env->DeleteLocalRef(exception);
+    return 1;
+  }
+  return interrupt ? 1 : 0;
+}
+
+} // anonymous namespace
+
+void Context::setInterruptHandler(JNIEnv* env, jobject handler) {
+  jobject globalHandler = nullptr;
+  jmethodID poll = nullptr;
+  if (handler) {
+    jclass handlerClass = env->GetObjectClass(handler);
+    poll = env->GetMethodID(handlerClass, "poll", "()Z");
+    env->DeleteLocalRef(handlerClass);
+    if (!poll) return;
+    globalHandler = env->NewGlobalRef(handler);
+    if (!globalHandler) return;
+  }
+  env->DeleteGlobalRef(interruptHandler);
+  interruptHandler = globalHandler;
+  interruptHandlerPoll = poll;
+  JS_SetInterruptHandler(jsRuntime, globalHandler ? pollInterruptHandler : nullptr, this);
+}
+
+jint Context::executePendingJobs(JNIEnv* env, jint maxJobs) {
+  jint executed = 0;
+  while (executed < maxJobs) {
+    JSContext* jobContext = nullptr;
+    const int status = JS_ExecutePendingJob(jsRuntime, &jobContext);
+    if (status == 0) break;
+    executed++;
+    if (status < 0) {
+      throwJsException(env, JS_EXCEPTION);
+      break;
+    }
+  }
+  return executed;
 }
 
 bool Context::getArrayLength(JNIEnv* env, const JSValueConst& value, jsize* length) const {
@@ -551,13 +660,11 @@ jobject Context::eval(JNIEnv* env, jstring source, jstring file) {
   }
   std::string sourceCodeString = toCppString(env, source);
   if (env->ExceptionCheck()) return nullptr;
+  std::string fileName = toCppString(env, file);
+  if (env->ExceptionCheck()) return nullptr;
 
-  const char* fileName = env->GetStringUTFChars(file, 0);
-  if (!fileName) return nullptr;
-
-  JSValue evalValue = JS_Eval(jsContext, sourceCodeString.c_str(), sourceCodeString.length(), fileName, 0);
-
-  env->ReleaseStringUTFChars(file, fileName);
+  JSValue evalValue = JS_Eval(jsContext, sourceCodeString.c_str(), sourceCodeString.length(),
+                              fileName.c_str(), 0);
 
   jobject result = toJavaObject(env, evalValue, false);
 
@@ -725,7 +832,18 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
                            "Unsupported Java type java.lang.Object");
         return JS_NULL;
       }
+      // Building a converter takes several reflective calls, so reuse one per runtime class.
+      for (const auto& entry : c->objectConverters) {
+        if (env->IsSameObject(actualClass, entry.first)) {
+          env->DeleteLocalRef(actualClass);
+          return entry.second(c, env, v);
+        }
+      }
       const auto converter = c->getJavaToJsConverter(env, actualClass, true);
+      if (!env->ExceptionCheck()) {
+        auto globalClass = static_cast<jclass>(env->NewGlobalRef(actualClass));
+        if (globalClass) c->objectConverters.emplace_back(globalClass, converter);
+      }
       env->DeleteLocalRef(actualClass);
       if (env->ExceptionCheck()) return JS_NULL;
       return converter(c, env, v);
@@ -1003,6 +1121,14 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
 
 void Context::throwJsException(JNIEnv* env, const JSValue& value) const {
   if (env->ExceptionCheck()) return;
+  if (interruptCause) {
+    // The JavaScript "interrupted" error stands in for this exception.
+    JS_FreeValue(jsContext, JS_GetException(jsContext));
+    env->Throw(interruptCause);
+    env->DeleteGlobalRef(interruptCause);
+    interruptCause = nullptr;
+    return;
+  }
   JSValue exceptionValue = JS_GetException(jsContext);
   JSValue causeHolder = JS_UNDEFINED;
   if (javaExceptionClassId && JS_IsObject(exceptionValue)) {

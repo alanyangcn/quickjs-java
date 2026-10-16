@@ -19,49 +19,41 @@
 #include "ExceptionThrowers.h"
 #include "JsMethodProxy.h"
 
-JsObjectProxy::JsObjectProxy(const char *name)
-    : name(name) {
+JsObjectProxy::JsObjectProxy(Context* context, const std::string& name, JSAtom nameAtom)
+    : name(name), nameAtom(nameAtom), context(context) {
 }
 
 JsObjectProxy::~JsObjectProxy() {
   for (auto method : methods) {
     delete method;
   }
+  JS_FreeAtom(context->jsContext, nameAtom);
 }
 
-jobject JsObjectProxy::call(Context *context, JNIEnv* env, jobject method, jobjectArray args) const {
-  JSValue global = JS_GetGlobalObject(context->jsContext);
-  JSValue thisPointer = JS_GetPropertyStr(context->jsContext, global, name.c_str());
-  if (JS_IsException(thisPointer)) {
-    // Report the getter's exception rather than failing later on an undefined receiver.
-    context->throwJsException(env, thisPointer);
-    JS_FreeValue(context->jsContext, global);
+bool JsObjectProxy::hasSameMethods(const JsObjectProxy& other) const {
+  if (name != other.name || methods.size() != other.methods.size()) return false;
+  for (size_t i = 0; i < methods.size(); i++) {
+    if (methods[i]->methodId != other.methods[i]->methodId) return false;
+  }
+  return true;
+}
+
+jobject JsObjectProxy::call(Context *context, JNIEnv* env, jint methodIndex, jobjectArray args) const {
+  if (methodIndex < 0 || static_cast<size_t>(methodIndex) >= methods.size()) {
+    throwJsExceptionFmt(env, context, "Could not find method %d on %s", methodIndex, name.c_str());
     return nullptr;
   }
 
-  const JsMethodProxy *methodProxy = nullptr;
-  for (auto m : methods) {
-    if (env->FromReflectedMethod(method) == m->methodId) {
-      methodProxy = m;
-      break;
-    }
+  JSValue global = JS_GetGlobalObject(context->jsContext);
+  JSValue thisPointer = JS_GetProperty(context->jsContext, global, nameAtom);
+  JS_FreeValue(context->jsContext, global);
+  if (JS_IsException(thisPointer)) {
+    // Report the getter's exception rather than failing later on an undefined receiver.
+    context->throwJsException(env, thisPointer);
+    return nullptr;
   }
 
-  jobject result;
-  if (methodProxy) {
-    result = methodProxy->call(context, env, thisPointer, args);
-  } else {
-    const jclass methodClass = env->GetObjectClass(method);
-    const jmethodID getName = env->GetMethodID(methodClass, "getName", "()Ljava/lang/String;");
-    jstring methodName = static_cast<jstring>(env->CallObjectMethod(method, getName));
-    const char *methodNameStr = env->GetStringUTFChars(methodName, 0);
-    throwJsExceptionFmt(env, context, "Could not find method %s.%s", name.c_str(), methodNameStr);
-    env->ReleaseStringUTFChars(methodName, methodNameStr);
-    result = nullptr;
-  }
+  jobject result = methods[methodIndex]->call(context, env, thisPointer, args);
   JS_FreeValue(context->jsContext, thisPointer);
-  JS_FreeValue(context->jsContext, global);
   return result;
 }
-
-

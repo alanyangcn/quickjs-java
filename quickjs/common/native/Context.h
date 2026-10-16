@@ -23,8 +23,8 @@
 #include <unordered_map>
 #include "quickjs/quickjs.h"
 
-class JSRuntime;
-class JSContext;
+struct JSRuntime;
+struct JSContext;
 class JsObjectProxy;
 
 class Context {
@@ -41,6 +41,8 @@ public:
   jobject eval(JNIEnv*, jstring source, jstring file);
   jobject execute(JNIEnv*, jbyteArray byteCode);
   jbyteArray compile(JNIEnv*, jstring source, jstring file);
+  jint executePendingJobs(JNIEnv*, jint maxJobs);
+  void setInterruptHandler(JNIEnv*, jobject handler);
   typedef std::function<JSValueConst(Context*, JNIEnv*, jvalue)> JavaToJavaScript;
   JavaToJavaScript getJavaToJsConverter(JNIEnv*, jclass type, bool boxed);
   typedef std::function<jvalue(Context*, JNIEnv*, JSValueConst)> JavaScriptToJava;
@@ -87,6 +89,16 @@ public:
   jmethodID quickJsExceptionConstructor;
   std::vector<JsObjectProxy*> objectProxies;
   std::unordered_map<std::string, jclass> globalReferences;
+  // Converters for the runtime classes of values passed as java.lang.Object.
+  std::vector<std::pair<jclass, JavaToJavaScript>> objectConverters;
+
+  // Native calls in progress; the outermost call records the current thread's stack top.
+  int nativeCallDepth = 0;
+  // Optional QuickJs.InterruptHandler, polled while JavaScript runs.
+  jobject interruptHandler = nullptr;
+  jmethodID interruptHandlerPoll = nullptr;
+  // An exception thrown by the interrupt handler, rethrown in place of "interrupted".
+  mutable jthrowable interruptCause = nullptr;
 
   // Largest array, and most array elements in one conversion, passed between JavaScript and Java.
   static const jsize MAX_ARRAY_LENGTH = 1 << 22;
@@ -96,7 +108,8 @@ public:
   size_t arrayElementsConverted = 0;
 };
 
-std::string getName(JNIEnv* env, jobject javaClass);
+// Returns the result of `object.getName()`, such as a class or method name, as UTF-8.
+std::string getName(JNIEnv* env, jobject object);
 std::string describeValue(JSContext* jsContext, JSValueConst value);
 
 #endif //QUICKJS_ANDROID_CONTEXT_H

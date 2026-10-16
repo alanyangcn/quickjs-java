@@ -21,7 +21,14 @@ import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -559,6 +566,246 @@ public final class QuickJsRegressionTest {
     assertThat(result[0]).isEqualTo(1);
     assertThat(result[1]).isNull();
     assertThat((Object[]) result[2]).asList().containsExactly(null, "a").inOrder();
+  }
+
+  // R15: interrupting scripts and limiting resources.
+
+  @Test public void interruptHandlerStopsRunawayScript() {
+    final AtomicInteger polls = new AtomicInteger();
+    quickjs.setInterruptHandler(new QuickJs.InterruptHandler() {
+      @Override public boolean poll() {
+        return polls.incrementAndGet() >= 3;
+      }
+    });
+    try {
+      // JavaScript can't catch the interruption.
+      quickjs.evaluate("try { while (true) {} } catch (e) { 'caught' }");
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e).hasMessageThat().isEqualTo("interrupted");
+    }
+    assertThat(polls.get()).isEqualTo(3);
+
+    quickjs.setInterruptHandler(null);
+    assertThat(quickjs.evaluate("var n = 0; for (var i = 0; i < 100000; i++) n++; n"))
+        .isEqualTo(100000);
+  }
+
+  @Test public void interruptHandlerExceptionIsRethrown() {
+    quickjs.setInterruptHandler(new QuickJs.InterruptHandler() {
+      @Override public boolean poll() {
+        throw new IllegalStateException("deadline exceeded");
+      }
+    });
+    try {
+      quickjs.evaluate("while (true) {}");
+      fail();
+    } catch (IllegalStateException e) {
+      assertThat(e).hasMessageThat().isEqualTo("deadline exceeded");
+    }
+
+    quickjs.setInterruptHandler(null);
+    assertThat(quickjs.evaluate("1 + 1")).isEqualTo(2);
+  }
+
+  @Test public void memoryLimit() {
+    quickjs.setMemoryLimit(4 * 1024 * 1024);
+    try {
+      quickjs.evaluate("var a = []; while (true) a.push(new Array(1000).fill(1));");
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e).hasMessageThat().isEqualTo("out of memory");
+    }
+    quickjs.evaluate("a = null;");
+
+    quickjs.setMemoryLimit(0);
+    assertThat(quickjs.evaluate("new Array(1000000).fill(1).length")).isEqualTo(1000000);
+  }
+
+  @Test public void maxStackSize() {
+    quickjs.evaluate("function depth(n) { return n == 0 ? 0 : 1 + depth(n - 1); }");
+    assertThat(quickjs.evaluate("depth(100)")).isEqualTo(100);
+
+    quickjs.setMaxStackSize(32 * 1024);
+    try {
+      quickjs.evaluate("depth(100)");
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e).hasMessageThat().isEqualTo("stack overflow");
+    }
+
+    quickjs.setMaxStackSize(256 * 1024);
+    assertThat(quickjs.evaluate("depth(100)")).isEqualTo(100);
+  }
+
+  @Test public void stackLimitFollowsCallingThread() throws Exception {
+    runIsolated("stackLimitFollowsCallingThread");
+  }
+
+  /** The engine is created on one thread and used on another. */
+  static void stackLimitFollowsCallingThreadScenario(final QuickJs quickjs) throws Exception {
+    final AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread thread = new Thread(null, new Runnable() {
+      @Override public void run() {
+        try {
+          quickjs.evaluate("function depth(n) { return n == 0 ? 0 : 1 + depth(n - 1); }");
+          assertThat(quickjs.evaluate("depth(100)")).isEqualTo(100);
+          try {
+            quickjs.evaluate("function forever() { return forever() + 1; } forever()");
+            fail();
+          } catch (QuickJsException e) {
+            assertThat(e).hasMessageThat().isEqualTo("stack overflow");
+          }
+        } catch (Throwable t) {
+          failure.set(t);
+        }
+      }
+    }, "quickjs", 4 * 1024 * 1024);
+    thread.start();
+    thread.join();
+    if (failure.get() instanceof Exception) throw (Exception) failure.get();
+    if (failure.get() instanceof Error) throw (Error) failure.get();
+  }
+
+  // R16: Promise jobs run only when asked to.
+
+  @Test public void executePendingJobs() {
+    quickjs.evaluate(""
+        + "var log = [];\n"
+        + "Promise.resolve(1)\n"
+        + "    .then(function(v) { log.push(v); return v + 1; })\n"
+        + "    .then(function(v) { log.push(v); });");
+    assertThat(quickjs.evaluate("log.length")).isEqualTo(0);
+
+    assertThat(quickjs.executePendingJobs(1)).isEqualTo(1);
+    assertThat(quickjs.evaluate("log.join()")).isEqualTo("1");
+
+    assertThat(quickjs.executePendingJobs(100)).isEqualTo(1);
+    assertThat(quickjs.evaluate("log.join()")).isEqualTo("1,2");
+    assertThat(quickjs.executePendingJobs(100)).isEqualTo(0);
+
+    try {
+      quickjs.executePendingJobs(0);
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat().isEqualTo("maxJobs <= 0: 0");
+    }
+  }
+
+  // R17: compile() and names use the same UTF-8 encoding as evaluate().
+
+  @Test public void compileAndEvaluateDecodeSourceAlike() {
+    String[] scripts = {
+        "'a\u0000b'.length",
+        "'\uD800'.length + ':' + '\uD800'.charCodeAt(0)",
+        "'\uD83D\uDE00'.length",
+    };
+    for (String script : scripts) {
+      Object evaluated = quickjs.evaluate(script);
+      Object executed = quickjs.execute(quickjs.compile(script, "test.js"));
+      assertThat(executed).isEqualTo(evaluated);
+    }
+    assertThat(quickjs.evaluate("'a\u0000b'.length")).isEqualTo(3);
+  }
+
+  interface Named {
+    String name();
+  }
+
+  @Test public void supplementaryCharactersInNames() {
+    // U+1D4B3 is a letter outside the BMP, so it is a valid identifier.
+    String name = "\uD835\uDCB3";
+    quickjs.set(name, Named.class, new Named() {
+      @Override public String name() {
+        return "set";
+      }
+    });
+    assertThat(quickjs.evaluate(name + ".name()")).isEqualTo("set");
+
+    quickjs.evaluate("var " + name + "2 = { name: function() { return 'get'; } };");
+    assertThat(quickjs.get(name + "2", Named.class).name()).isEqualTo("get");
+
+    try {
+      quickjs.evaluate("throw new Error('boom');", "\uD83D\uDE00.js");
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e.getStackTrace()[0].getFileName()).isEqualTo("\uD83D\uDE00.js");
+    }
+  }
+
+  // R18: proxies and leaked instances.
+
+  @Test public void repeatedGetReturnsWorkingProxies() {
+    quickjs.evaluate("var named = { name: function() { return 'a'; } };");
+    List<Named> proxies = new ArrayList<>();
+    for (int i = 0; i < 1000; i++) {
+      proxies.add(quickjs.get("named", Named.class));
+    }
+    quickjs.evaluate("named = { name: function() { return 'b'; } };");
+    for (Named proxy : proxies) {
+      assertThat(proxy.name()).isEqualTo("b");
+    }
+  }
+
+  @Test public void leakedInstanceIsReported() throws Exception {
+    final List<String> warnings = new ArrayList<>();
+    Handler handler = new Handler() {
+      @Override public void publish(LogRecord record) {
+        synchronized (warnings) {
+          warnings.add(record.getMessage());
+        }
+      }
+
+      @Override public void flush() {
+      }
+
+      @Override public void close() {
+      }
+    };
+    Logger logger = Logger.getLogger(QuickJs.class.getName());
+    logger.addHandler(handler);
+    try {
+      QuickJs.create(); // Leaked on purpose.
+      for (int i = 0; i < 100; i++) {
+        System.gc();
+        Thread.sleep(10);
+        QuickJs.create().close(); // Reports leaks found so far.
+        synchronized (warnings) {
+          if (!warnings.isEmpty()) break;
+        }
+      }
+      synchronized (warnings) {
+        assertThat(warnings).contains("QuickJs instance leaked!");
+      }
+    } finally {
+      logger.removeHandler(handler);
+    }
+  }
+
+  // R20: converters for java.lang.Object arguments are cached per runtime class.
+
+  interface Echoes {
+    Object echo(Object value);
+  }
+
+  @Test public void objectArgumentsOfManyTypes() {
+    quickjs.evaluate("var echoes = { echo: function(v) { return v; } };");
+    Echoes echoes = quickjs.get("echoes", Echoes.class);
+    for (int i = 0; i < 3; i++) {
+      assertThat(echoes.echo(1)).isEqualTo(1);
+      assertThat(echoes.echo("a")).isEqualTo("a");
+      assertThat(echoes.echo(true)).isEqualTo(true);
+      assertThat(echoes.echo(1.5)).isEqualTo(1.5);
+      assertThat((Object[]) echoes.echo(new Object[] {1, "b"})).asList()
+          .containsExactly(1, "b").inOrder();
+      assertThat((Object[]) echoes.echo(new String[] {"c"})).asList().containsExactly("c");
+      try {
+        echoes.echo(new Date());
+        fail();
+      } catch (IllegalArgumentException e) {
+        assertThat(e).hasMessageThat().isEqualTo("Unsupported Java type java.util.Date");
+      }
+    }
   }
 
   private static void assertConversionFails(String message, Runnable runnable) {

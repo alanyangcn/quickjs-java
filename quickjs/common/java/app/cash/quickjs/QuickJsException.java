@@ -30,10 +30,11 @@ public final class QuickJsException extends RuntimeException {
   /**
    * QuickJs stack trace strings have multiple lines of the format "at func (file.ext:line)".
    * "func" is optional, but we'll omit frames without a function, since it means the frame is in
-   * native code.
+   * native code. Newer QuickJS versions append a column ("file.ext:line:column"), which is
+   * accepted and ignored.
    */
   private final static Pattern STACK_TRACE_PATTERN =
-      Pattern.compile("\\s*at (\\S+) \\((.+?)(?::(\\d+))?\\)\\s*$");
+      Pattern.compile("\\s*at (\\S+) \\((.+?)(?::(\\d+)(?::\\d+)?)?\\)\\s*$");
 
   /** Java StackTraceElements require a class name.  We don't have one in JS, so use this. */
   private final static String STACK_TRACE_CLASS_NAME = "JavaScript";
@@ -53,9 +54,6 @@ public final class QuickJsException extends RuntimeException {
    */
   private static void addJavaScriptStack(Throwable throwable, String detailMessage) {
     String[] lines = detailMessage.split("\n", -1);
-    if (lines.length == 0) {
-      return;
-    }
     // We have a stacktrace following the message.  Add it to the exception.
     List<StackTraceElement> elements = new ArrayList<>();
 

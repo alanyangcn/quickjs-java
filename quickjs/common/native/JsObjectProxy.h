@@ -19,19 +19,29 @@
 #include <jni.h>
 #include <vector>
 #include <string>
+#include "quickjs/quickjs.h"
 
 class Context;
 class JsMethodProxy;
 
 class JsObjectProxy {
 public:
-  JsObjectProxy(const char *name);
+  // Takes ownership of `nameAtom`.
+  JsObjectProxy(Context* context, const std::string& name, JSAtom nameAtom);
   ~JsObjectProxy();
 
-  jobject call(Context* context, JNIEnv*, jobject method, jobjectArray args) const;
+  // Calls methods[methodIndex] on the global object currently called `name`.
+  jobject call(Context* context, JNIEnv*, jint methodIndex, jobjectArray args) const;
+
+  // True if `other` proxies the same global with the same Java methods.
+  bool hasSameMethods(const JsObjectProxy& other) const;
 
   const std::string name;
+  const JSAtom nameAtom;
   std::vector<JsMethodProxy*> methods;
+
+private:
+  Context* const context;
 };
 
 #endif //QUICKJS_ANDROID_JSOBJECTPROXY_H
