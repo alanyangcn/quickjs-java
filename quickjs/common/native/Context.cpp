@@ -29,14 +29,51 @@
 std::string getName(JNIEnv* env, jobject javaClass) {
   auto classType = env->GetObjectClass(javaClass);
   const jmethodID method = env->GetMethodID(classType, "getName", "()Ljava/lang/String;");
+  env->DeleteLocalRef(classType);
+  if (!method) return {};
   auto javaString = static_cast<jstring>(env->CallObjectMethod(javaClass, method));
+  if (env->ExceptionCheck() || !javaString) {
+    env->DeleteLocalRef(javaString);
+    return {};
+  }
   const auto s = env->GetStringUTFChars(javaString, nullptr);
+  if (!s) {
+    env->DeleteLocalRef(javaString);
+    return {};
+  }
 
   std::string str(s);
   env->ReleaseStringUTFChars(javaString, s);
   env->DeleteLocalRef(javaString);
-  env->DeleteLocalRef(classType);
   return str;
+}
+
+static jclass getComponentType(JNIEnv* env, jclass arrayType) {
+  auto classType = env->GetObjectClass(arrayType);
+  const jmethodID method = env->GetMethodID(classType, "getComponentType", "()Ljava/lang/Class;");
+  env->DeleteLocalRef(classType);
+  if (!method) return nullptr;
+  auto componentType = static_cast<jclass>(env->CallObjectMethod(arrayType, method));
+  if (env->ExceptionCheck()) {
+    env->DeleteLocalRef(componentType);
+    return nullptr;
+  }
+  return componentType;
+}
+
+/*
+ * Returns `value` as a UTF-8 string for error messages. Never fails: values that cannot be
+ * converted (such as symbols) get a placeholder.
+ */
+std::string describeValue(JSContext* jsContext, JSValueConst value) {
+  const char* str = JS_ToCString(jsContext, value);
+  if (!str) {
+    JS_FreeValue(jsContext, JS_GetException(jsContext));
+    return "<unprintable>";
+  }
+  std::string result(str);
+  JS_FreeCString(jsContext, str);
+  return result;
 }
 
 namespace {
@@ -66,18 +103,24 @@ void jsFinalize(JSRuntime* jsRuntime, JSValue val) {
 }
 
 /*
- * Returns `value` as a UTF-8 string for error messages. Never fails: values that cannot be
- * converted (such as symbols) get a placeholder.
+ * Converts a number that is exactly representable as an int, including -0, without the wrapping
+ * and truncation of ToInt32. Returns false for anything else.
  */
-std::string describeValue(JSContext* jsContext, JSValueConst value) {
-  const char* str = JS_ToCString(jsContext, value);
-  if (!str) {
-    JS_FreeValue(jsContext, JS_GetException(jsContext));
-    return "<unprintable>";
+bool toExactInt32(JSValueConst value, int32_t* out) {
+  if (JS_VALUE_GET_TAG(value) == JS_TAG_INT) {
+    *out = JS_VALUE_GET_INT(value);
+    return true;
   }
-  std::string result(str);
-  JS_FreeCString(jsContext, str);
-  return result;
+  if (!JS_TAG_IS_FLOAT64(JS_VALUE_GET_TAG(value))) return false;
+  const double d = JS_VALUE_GET_FLOAT64(value);
+  // NaN fails both comparisons.
+  if (!(d >= std::numeric_limits<int32_t>::min() && d <= std::numeric_limits<int32_t>::max())) {
+    return false;
+  }
+  const auto i = static_cast<int32_t>(d);
+  if (static_cast<double>(i) != d) return false;
+  *out = i;
+  return true;
 }
 
 struct JniThreadDetacher {
@@ -94,35 +137,84 @@ struct JniThreadDetacher {
 } // anonymous namespace
 
 Context::Context(JNIEnv* env)
-    : jniVersion(env->GetVersion()), jsRuntime(JS_NewRuntime()),
-      jsContext(JS_NewContext(jsRuntime)), jsClassId(0), javaExceptionClassId(0),
-      booleanClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Boolean")))),
-      integerClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Integer")))),
-      doubleClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Double")))),
-      objectClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/Object")))),
-      stringClass(static_cast<jclass>(env->NewGlobalRef(env->FindClass("java/lang/String")))),
-      stringUtf8(static_cast<jstring>(env->NewGlobalRef(env->NewStringUTF("UTF-8")))),
-      quickJsExceptionClass(static_cast<jclass>(env->NewGlobalRef(
-          env->FindClass("app/cash/quickjs/QuickJsException")))),
-      booleanValueOf(env->GetStaticMethodID(booleanClass, "valueOf", "(Z)Ljava/lang/Boolean;")),
-      booleanGetValue(env->GetMethodID(booleanClass, "booleanValue", "()Z")),
-      integerValueOf(env->GetStaticMethodID(integerClass, "valueOf", "(I)Ljava/lang/Integer;")),
-      integerGetValue(env->GetMethodID(integerClass, "intValue", "()I")),
-      doubleValueOf(env->GetStaticMethodID(doubleClass, "valueOf", "(D)Ljava/lang/Double;")),
-      doubleGetValue(env->GetMethodID(doubleClass, "doubleValue", "()D")),
-      stringGetBytes(env->GetMethodID(stringClass, "getBytes", "(Ljava/lang/String;)[B")),
-      stringConstructor(env->GetMethodID(stringClass, "<init>", "([BLjava/lang/String;)V")),
-      quickJsExceptionConstructor(env->GetMethodID(quickJsExceptionClass, "<init>",
-                                                   "(Ljava/lang/String;Ljava/lang/String;)V")) {
+    : javaVm(nullptr), jniVersion(env->GetVersion()), jsRuntime(JS_NewRuntime()),
+      jsContext(jsRuntime ? JS_NewContext(jsRuntime) : nullptr), jsClassId(0),
+      javaExceptionClassId(0), booleanClass(nullptr), integerClass(nullptr), doubleClass(nullptr),
+      objectClass(nullptr), stringClass(nullptr), stringUtf8(nullptr),
+      quickJsExceptionClass(nullptr), booleanValueOf(nullptr), booleanGetValue(nullptr),
+      integerValueOf(nullptr), integerGetValue(nullptr), doubleValueOf(nullptr),
+      doubleGetValue(nullptr), stringGetBytes(nullptr), stringConstructor(nullptr),
+      quickJsExceptionConstructor(nullptr) {
   env->GetJavaVM(&javaVm);
-  JS_SetRuntimeOpaque(jsRuntime, this);
+  if (jsRuntime) {
+    JS_SetRuntimeOpaque(jsRuntime, this);
+  }
+}
+
+namespace {
+
+jclass findGlobalClass(JNIEnv* env, const char* name) {
+  jclass localClass = env->FindClass(name);
+  if (!localClass) return nullptr;
+  auto globalClass = static_cast<jclass>(env->NewGlobalRef(localClass));
+  env->DeleteLocalRef(localClass);
+  return globalClass;
+}
+
+} // anonymous namespace
+
+bool Context::initialize(JNIEnv* env) {
+  if (!javaVm || !jsRuntime || !jsContext) return false;
+
+  booleanClass = findGlobalClass(env, "java/lang/Boolean");
+  if (!booleanClass) return false;
+  integerClass = findGlobalClass(env, "java/lang/Integer");
+  if (!integerClass) return false;
+  doubleClass = findGlobalClass(env, "java/lang/Double");
+  if (!doubleClass) return false;
+  objectClass = findGlobalClass(env, "java/lang/Object");
+  if (!objectClass) return false;
+  stringClass = findGlobalClass(env, "java/lang/String");
+  if (!stringClass) return false;
+  quickJsExceptionClass = findGlobalClass(env, "app/cash/quickjs/QuickJsException");
+  if (!quickJsExceptionClass) return false;
+
+  jstring utf8 = env->NewStringUTF("UTF-8");
+  if (!utf8) return false;
+  stringUtf8 = static_cast<jstring>(env->NewGlobalRef(utf8));
+  env->DeleteLocalRef(utf8);
+  if (!stringUtf8) return false;
+
+  booleanValueOf = env->GetStaticMethodID(booleanClass, "valueOf", "(Z)Ljava/lang/Boolean;");
+  if (!booleanValueOf) return false;
+  booleanGetValue = env->GetMethodID(booleanClass, "booleanValue", "()Z");
+  if (!booleanGetValue) return false;
+  integerValueOf = env->GetStaticMethodID(integerClass, "valueOf", "(I)Ljava/lang/Integer;");
+  if (!integerValueOf) return false;
+  integerGetValue = env->GetMethodID(integerClass, "intValue", "()I");
+  if (!integerGetValue) return false;
+  doubleValueOf = env->GetStaticMethodID(doubleClass, "valueOf", "(D)Ljava/lang/Double;");
+  if (!doubleValueOf) return false;
+  doubleGetValue = env->GetMethodID(doubleClass, "doubleValue", "()D");
+  if (!doubleGetValue) return false;
+  stringGetBytes = env->GetMethodID(stringClass, "getBytes", "(Ljava/lang/String;)[B");
+  if (!stringGetBytes) return false;
+  stringConstructor = env->GetMethodID(stringClass, "<init>", "([BLjava/lang/String;)V");
+  if (!stringConstructor) return false;
+  quickJsExceptionConstructor = env->GetMethodID(quickJsExceptionClass, "<init>",
+                                                 "(Ljava/lang/String;Ljava/lang/String;)V");
+  return quickJsExceptionConstructor != nullptr;
 }
 
 Context::~Context() {
   for (auto proxy : objectProxies) {
     delete proxy;
   }
-  auto env = getEnv();
+  // Free JavaScript objects first: their finalizers may release Java references.
+  if (jsContext) JS_FreeContext(jsContext);
+  if (jsRuntime) JS_FreeRuntime(jsRuntime);
+  auto env = javaVm ? getEnv() : nullptr;
+  if (!env) return;
   for (auto refs : globalReferences) {
     env->DeleteGlobalRef(refs.second);
   }
@@ -133,8 +225,6 @@ Context::~Context() {
   env->DeleteGlobalRef(doubleClass);
   env->DeleteGlobalRef(integerClass);
   env->DeleteGlobalRef(booleanClass);
-  JS_FreeContext(jsContext);
-  JS_FreeRuntime(jsRuntime);
 }
 
 jobject Context::execute(JNIEnv* env, jbyteArray byteCode) {
@@ -155,7 +245,8 @@ jobject Context::execute(JNIEnv* env, jbyteArray byteCode) {
   }
 
   if (JS_ResolveModule(jsContext, obj)) {
-    throwJsExceptionFmt(env, this, "Failed to resolve JS module");
+    JS_FreeValue(jsContext, obj);
+    throwJsException(env, JS_EXCEPTION);
     return nullptr;
   }
 
@@ -229,18 +320,20 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
   if (JS_IsObject(obj)) {
     jsObjectProxy = new JsObjectProxy(nameStr);
     jsize numMethods = env->GetArrayLength(methods);
-    jmethodID getName = nullptr;
     for (int i = 0; i < numMethods && !env->ExceptionCheck(); ++i) {
       jobject method = env->GetObjectArrayElement(methods, i);
-      if (!getName) {
-        jclass methodClass = env->GetObjectClass(method);
-        getName = env->GetMethodID(methodClass, "getName", "()Ljava/lang/String;");
+      if (!method) break;
+      const auto methodNameString = ::getName(env, method);
+      if (env->ExceptionCheck()) {
+        env->DeleteLocalRef(method);
+        break;
       }
-      jstring methodName = static_cast<jstring>(env->CallObjectMethod(method, getName));
-      const char* methodNameStr = env->GetStringUTFChars(methodName, 0);
+      const char* methodNameStr = methodNameString.c_str();
 
       JSValue prop = JS_GetPropertyStr(jsContext, obj, methodNameStr);
-      if (JS_IsFunction(jsContext, prop)) {
+      if (JS_IsException(prop)) {
+        throwJsException(env, prop);
+      } else if (JS_IsFunction(jsContext, prop)) {
         jsObjectProxy->methods.push_back(new JsMethodProxy(this, env, methodNameStr, method));
       } else {
         const char* msg = JS_IsUndefined(prop)
@@ -249,7 +342,7 @@ JsObjectProxy* Context::getObjectProxy(JNIEnv* env, jstring name, jobjectArray m
         throwJsExceptionFmt(env, this, msg, nameStr, methodNameStr);
       }
       JS_FreeValue(jsContext, prop);
-      env->ReleaseStringUTFChars(methodName, methodNameStr);
+      env->DeleteLocalRef(method);
     }
     if (!env->ExceptionCheck()) {
       objectProxies.push_back(jsObjectProxy);
@@ -300,13 +393,21 @@ void Context::setObjectProxy(JNIEnv* env, jstring name, jobject object, jobjectA
       }
     }
     if (jsClassId != 0) {
+      // Fully build the proxy before publishing it, so a failure leaves no global behind.
       auto proxy = JS_NewObjectClass(jsContext, jsClassId);
-      if (JS_IsException(proxy) || JS_SetProperty(jsContext, global, objName, proxy) <= 0) {
+      if (JS_IsException(proxy)) {
         throwJsException(env, proxy);
       } else {
         std::unique_ptr<JavaObjectProxy> javaObject(new JavaObjectProxy(this, env, nameStr, object, methods, proxy));
-        if (!env->ExceptionCheck()) {
+        if (env->ExceptionCheck()) {
+          JS_FreeValue(jsContext, proxy);
+        } else {
           JS_SetOpaque(proxy, javaObject.release());
+          // Takes ownership of proxy.
+          if (JS_DefinePropertyValue(jsContext, global, objName, proxy,
+                                     JS_PROP_C_W_E | JS_PROP_THROW) < 0) {
+            throwJsException(env, JS_EXCEPTION);
+          }
         }
       }
     }
@@ -317,6 +418,25 @@ void Context::setObjectProxy(JNIEnv* env, jstring name, jobject object, jobjectA
   JS_FreeAtom(jsContext, objName);
   env->ReleaseStringUTFChars(name, nameStr);
   JS_FreeValue(jsContext, global);
+}
+
+bool Context::getArrayLength(JNIEnv* env, const JSValueConst& value, jsize* length) const {
+  auto jsLength = JS_GetPropertyStr(jsContext, value, "length");
+  uint64_t index = 0;
+  const int failed = JS_IsException(jsLength) || JS_ToIndex(jsContext, &index, jsLength);
+  JS_FreeValue(jsContext, jsLength);
+  if (failed) {
+    throwJsException(env, JS_EXCEPTION);
+    return false;
+  }
+  if (index > MAX_ARRAY_LENGTH) {
+    throwJavaException(env, "java/lang/IllegalArgumentException",
+                       "Cannot marshal a JavaScript array of length %llu to Java (limit %d)",
+                       static_cast<unsigned long long>(index), static_cast<int>(MAX_ARRAY_LENGTH));
+    return false;
+  }
+  *length = static_cast<jsize>(index);
+  return true;
 }
 
 jobject
@@ -343,7 +463,7 @@ Context::toJavaObject(JNIEnv* env, const JSValueConst& value, bool throwOnUnsupp
 
     case JS_TAG_INT: {
       jvalue v;
-      v.j = static_cast<jint>(JS_VALUE_GET_INT(value));
+      v.i = static_cast<jint>(JS_VALUE_GET_INT(value));
       result = env->CallStaticObjectMethodA(integerClass, integerValueOf, &v);
       break;
     }
@@ -378,12 +498,26 @@ Context::toJavaObject(JNIEnv* env, const JSValueConst& value, bool throwOnUnsupp
           result = nullptr;
           break;
         }
+        jsize arrayLength = 0;
+        if (!getArrayLength(env, value, &arrayLength)) {
+          result = nullptr;
+          break;
+        }
+        // Bound the total work too: shared sub-arrays are converted once per reference.
+        if (arraysBeingConverted.empty()) arrayElementsConverted = 0;
+        arrayElementsConverted += arrayLength;
+        if (arrayElementsConverted > MAX_ARRAY_LENGTH) {
+          throwJavaException(env, "java/lang/IllegalArgumentException",
+                             "Cannot marshal more than %d JavaScript array elements to Java",
+                             static_cast<int>(MAX_ARRAY_LENGTH));
+          result = nullptr;
+          break;
+        }
         arraysBeingConverted.push_back(array);
-        const auto arrayLength = JS_VALUE_GET_INT(JS_GetPropertyStr(jsContext, value, "length"));
         result = env->NewObjectArray(arrayLength, objectClass, nullptr);
-        for (int i = 0; result && i < arrayLength && !env->ExceptionCheck(); i++) {
+        for (jsize i = 0; result && i < arrayLength && !env->ExceptionCheck(); i++) {
           auto element = JS_GetPropertyUint32(jsContext, value, i);
-          auto javaElement = toJavaObject(env, element);
+          auto javaElement = toJavaObject(env, element, throwOnUnsupportedType);
           if (!env->ExceptionCheck()) {
             env->SetObjectArrayElement(static_cast<jobjectArray>(result), i, javaElement);
           }
@@ -434,15 +568,22 @@ jobject Context::eval(JNIEnv* env, jstring source, jstring file) {
 
 Context::JavaToJavaScript
 Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
+  if (!type || env->ExceptionCheck()) {
+    return [](Context*, JNIEnv*, jvalue) { return JS_UNDEFINED; }; // Never called.
+  }
   const auto typeName = getName(env, type);
+  if (env->ExceptionCheck()) {
+    return [](Context*, JNIEnv*, jvalue) { return JS_UNDEFINED; }; // Never called.
+  }
   if (!typeName.empty() && typeName[0] == '[') {
     // type is an array.
-    const jmethodID method = env->GetMethodID(env->GetObjectClass(type),
-                                              "getComponentType",
-                                              "()Ljava/lang/Class;");
-    auto elementType = static_cast<jclass>(env->CallObjectMethod(type, method));
+    auto elementType = getComponentType(env, type);
+    if (!elementType) {
+      return [](Context*, JNIEnv*, jvalue) { return JS_UNDEFINED; }; // Never called.
+    }
     const auto elementTypeName = getName(env, elementType);
     if (elementTypeName == "double") {
+      env->DeleteLocalRef(elementType);
       return [](Context* c, JNIEnv* env, jvalue v) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
@@ -463,6 +604,7 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         return result;
       };
     } else if (elementTypeName == "int") {
+      env->DeleteLocalRef(elementType);
       return [](Context* c, JNIEnv* env, jvalue v) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
@@ -483,6 +625,7 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
         return result;
       };
     } else if (elementTypeName == "boolean") {
+      env->DeleteLocalRef(elementType);
       return [](Context* c, JNIEnv* env, jvalue v) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
@@ -504,6 +647,7 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
       };
     } else {
       auto converter = getJavaToJsConverter(env, elementType, true);
+      env->DeleteLocalRef(elementType);
       return [converter](Context* c, JNIEnv* env, jvalue v) {
         if (!v.l) return JS_NULL;
         JSValue result = JS_NewArray(c->jsContext);
@@ -602,15 +746,22 @@ Context::getJavaToJsConverter(JNIEnv* env, jclass type, bool boxed) {
 
 Context::JavaScriptToJava
 Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
+  if (!type || env->ExceptionCheck()) {
+    return [](Context*, JNIEnv*, const JSValueConst&) { return jvalue(); }; // Never called.
+  }
   const auto typeName = getName(env, type);
+  if (env->ExceptionCheck()) {
+    return [](Context*, JNIEnv*, const JSValueConst&) { return jvalue(); }; // Never called.
+  }
   if (!typeName.empty() && typeName[0] == '[') {
     // type is an array.
-    const jmethodID method = env->GetMethodID(env->GetObjectClass(type),
-                                              "getComponentType",
-                                              "()Ljava/lang/Class;");
-    auto elementType = static_cast<jclass>(env->CallObjectMethod(type, method));
+    auto elementType = getComponentType(env, type);
+    if (!elementType) {
+      return [](Context*, JNIEnv*, const JSValueConst&) { return jvalue(); }; // Never called.
+    }
     const auto elementTypeName = getName(env, elementType);
     if (elementTypeName == "double") {
+      env->DeleteLocalRef(elementType);
       return [](Context* c, JNIEnv* env, const JSValueConst& v) {
         jvalue result;
         if (JS_IsNull(v) || JS_IsUndefined(v)) {
@@ -619,14 +770,12 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
           result.l = nullptr;
           c->throwJsException(env, v);
         } else {
-          int length = 0;
-          auto jsLength = JS_GetPropertyStr(c->jsContext, v, "length");
-          if (JS_ToInt32(c->jsContext, &length, jsLength)) {
+          jsize length = 0;
+          if (!c->getArrayLength(env, v, &length)) {
             result.l = nullptr;
-            c->throwJsException(env, jsLength);
           } else {
             result.l = env->NewDoubleArray(length);
-            for (int i = 0; i < length && !env->ExceptionCheck(); i++) {
+            for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
               double element;
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
               if (!JS_IsNumber(jsElement)) {
@@ -641,11 +790,11 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
               JS_FreeValue(c->jsContext, jsElement);
             }
           }
-          JS_FreeValue(c->jsContext, jsLength);
         }
         return result;
       };
     } else if (elementTypeName == "int") {
+      env->DeleteLocalRef(elementType);
       return [](Context* c, JNIEnv* env, const JSValueConst& v) {
         jvalue result;
         if (JS_IsNull(v) || JS_IsUndefined(v)) {
@@ -654,33 +803,29 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
           result.l = nullptr;
           c->throwJsException(env, v);
         } else {
-          int length = 0;
-          auto jsLength = JS_GetPropertyStr(c->jsContext, v, "length");
-          if (JS_ToInt32(c->jsContext, &length, jsLength)) {
+          jsize length = 0;
+          if (!c->getArrayLength(env, v, &length)) {
             result.l = nullptr;
-            c->throwJsException(env, jsLength);
           } else {
             result.l = env->NewIntArray(length);
-            for (int i = 0; i < length && !env->ExceptionCheck(); i++) {
+            for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
               int element;
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
-              if (JS_VALUE_GET_TAG(jsElement) != JS_TAG_INT) {
+              if (!toExactInt32(jsElement, &element)) {
                 throwJavaException(env, "java/lang/IllegalArgumentException",
                                    "Cannot convert value %s to int",
                                    describeValue(c->jsContext, jsElement).c_str());
-              } else if (JS_ToInt32(c->jsContext, &element, jsElement)) {
-                c->throwJsException(env, jsElement);
               } else {
                 env->SetIntArrayRegion(static_cast<jintArray>(result.l), i, 1, &element);
               }
               JS_FreeValue(c->jsContext, jsElement);
             }
           }
-          JS_FreeValue(c->jsContext, jsLength);
         }
         return result;
       };
     } else if (elementTypeName == "boolean") {
+      env->DeleteLocalRef(elementType);
       return [](Context* c, JNIEnv* env, const JSValueConst& v) {
         jvalue result;
         if (JS_IsNull(v) || JS_IsUndefined(v)) {
@@ -689,14 +834,12 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
           result.l = nullptr;
           c->throwJsException(env, v);
         } else {
-          int length = 0;
-          auto jsLength = JS_GetPropertyStr(c->jsContext, v, "length");
-          if (JS_ToInt32(c->jsContext, &length, jsLength)) {
+          jsize length = 0;
+          if (!c->getArrayLength(env, v, &length)) {
             result.l = nullptr;
-            c->throwJsException(env, jsLength);
           } else {
             result.l = env->NewBooleanArray(length);
-            for (int i = 0; i < length && !env->ExceptionCheck(); i++) {
+            for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
               if (!JS_IsBool(jsElement)) {
                 throwJavaException(env, "java/lang/IllegalArgumentException",
@@ -714,13 +857,13 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
               JS_FreeValue(c->jsContext, jsElement);
             }
           }
-          JS_FreeValue(c->jsContext, jsLength);
         }
         return result;
       };
     } else {
       auto converter = getJsToJavaConverter(env, elementType, true);
       auto elementTypeGlobalRef = getGlobalRef(env, elementType);
+      env->DeleteLocalRef(elementType);
       return [converter, elementTypeGlobalRef](Context* c, JNIEnv* env,
                                                const JSValueConst& v) {
         jvalue result;
@@ -730,22 +873,20 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
           result.l = nullptr;
           c->throwJsException(env, v);
         } else {
-          int length = 0;
-          auto jsLength = JS_GetPropertyStr(c->jsContext, v, "length");
-          if (JS_ToInt32(c->jsContext, &length, jsLength)) {
+          jsize length = 0;
+          if (!c->getArrayLength(env, v, &length)) {
             result.l = nullptr;
-            c->throwJsException(env, jsLength);
           } else {
             result.l = env->NewObjectArray(length, elementTypeGlobalRef, nullptr);
-            for (int i = 0; i < length && !env->ExceptionCheck(); i++) {
+            for (jsize i = 0; i < length && !env->ExceptionCheck(); i++) {
               auto jsElement = JS_GetPropertyUint32(c->jsContext, v, i);
               jvalue element = converter(c, env, jsElement);
               JS_FreeValue(c->jsContext, jsElement);
               if (env->ExceptionCheck()) break;
               env->SetObjectArrayElement(static_cast<jobjectArray>(result.l), i, element.l);
+              env->DeleteLocalRef(element.l);
             }
           }
-          JS_FreeValue(c->jsContext, jsLength);
         }
         return result;
       };
@@ -770,111 +911,64 @@ Context::getJsToJavaConverter(JNIEnv* env, jclass type, bool boxed) {
       }
       return result;
     };
-  } else if (typeName == "java.lang.Double" || (typeName == "double" && boxed)) {
-    return [](Context* c, JNIEnv* env, const JSValueConst& v) {
+  } else if (typeName == "java.lang.Double" || typeName == "double") {
+    const bool nullable = typeName == "java.lang.Double" || boxed;
+    return [nullable](Context* c, JNIEnv* env, const JSValueConst& v) {
       jvalue result;
-      if (JS_IsNull(v) || JS_IsUndefined(v)) {
-        result.l = nullptr;
-      } else if (JS_IsException(v)) {
-        result.l = nullptr;
+      result.l = nullptr;
+      if (JS_IsException(v)) {
         c->throwJsException(env, v);
-      } else {
-        if (JS_ToFloat64(c->jsContext, &result.d, v)) {
-          c->throwJsException(env, v);
-          result.l = nullptr;
-        } else {
-          result.l = env->CallStaticObjectMethodA(c->doubleClass, c->doubleValueOf, &result);
-        }
-      }
-      return result;
-    };
-  } else if (typeName == "java.lang.Integer" || (typeName == "int" && boxed)) {
-    return [](Context* c, JNIEnv* env, const JSValueConst& v) {
-      jvalue result;
-      if (JS_IsNull(v) || JS_IsUndefined(v)) {
-        result.l = nullptr;
-      } else if (JS_IsException(v)) {
-        result.l = nullptr;
-        c->throwJsException(env, v);
-      } else {
-        if (JS_ToInt32(c->jsContext, &result.i, v)) {
-          c->throwJsException(env, v);
-          result.l = nullptr;
-        } else {
-          result.l = env->CallStaticObjectMethodA(c->integerClass, c->integerValueOf, &result);
-        }
-      }
-      return result;
-    };
-  } else if (typeName == "java.lang.Boolean" || (typeName == "boolean" && boxed)) {
-    return [](Context* c, JNIEnv* env, const JSValueConst& v) {
-      jvalue result;
-      if (JS_IsNull(v) || JS_IsUndefined(v)) {
-        result.l = nullptr;
-      } else if (JS_IsException(v)) {
-        result.l = nullptr;
-        c->throwJsException(env, v);
-      } else {
-        int r = JS_ToBool(c->jsContext, v);
-        if (r < 0) {
-          c->throwJsException(env, v);
-          result.l = nullptr;
-        } else {
-          result.z = r != 0;
-          result.l = env->CallStaticObjectMethodA(c->booleanClass, c->booleanValueOf, &result);
-        }
-      }
-      return result;
-    };
-  } else if (typeName == "double") {
-    return [](Context* c, JNIEnv* env, const JSValueConst& v) {
-      jvalue result;
-      if (!JS_IsNumber(v)) {
-        result.l = nullptr;
+      } else if (nullable && (JS_IsNull(v) || JS_IsUndefined(v))) {
+        // Leave as null.
+      } else if (!JS_IsNumber(v)) {
         throwJavaException(env, "java/lang/IllegalArgumentException",
                            "Cannot convert value %s to double",
                            describeValue(c->jsContext, v).c_str());
-      } else if (JS_IsException(v)) {
-        result.l = nullptr;
-        c->throwJsException(env, v);
       } else if (JS_ToFloat64(c->jsContext, &result.d, v)) {
-        c->throwJsException(env, v);
+        c->throwJsException(env, JS_EXCEPTION);
+        result.l = nullptr;
+      } else if (nullable) {
+        result.l = env->CallStaticObjectMethodA(c->doubleClass, c->doubleValueOf, &result);
       }
       return result;
     };
-  } else if (typeName == "int") {
-    return [](Context* c, JNIEnv* env, const JSValueConst& v) {
+  } else if (typeName == "java.lang.Integer" || typeName == "int") {
+    const bool nullable = typeName == "java.lang.Integer" || boxed;
+    return [nullable](Context* c, JNIEnv* env, const JSValueConst& v) {
       jvalue result;
-      if (JS_VALUE_GET_TAG(v) != JS_TAG_INT) {
+      result.l = nullptr;
+      if (JS_IsException(v)) {
+        c->throwJsException(env, v);
+      } else if (nullable && (JS_IsNull(v) || JS_IsUndefined(v))) {
+        // Leave as null.
+      } else if (!toExactInt32(v, &result.i)) {
         result.l = nullptr;
         throwJavaException(env, "java/lang/IllegalArgumentException",
                            "Cannot convert value %s to int",
                            describeValue(c->jsContext, v).c_str());
-      } else if (JS_IsException(v)) {
-        result.l = nullptr;
-        c->throwJsException(env, v);
-      } else if (JS_ToInt32(c->jsContext, &result.i, v)) {
-        c->throwJsException(env, v);
+      } else if (nullable) {
+        result.l = env->CallStaticObjectMethodA(c->integerClass, c->integerValueOf, &result);
       }
       return result;
     };
-  } else if (typeName == "boolean") {
-    return [](Context* c, JNIEnv* env, const JSValueConst& v) {
+  } else if (typeName == "java.lang.Boolean" || typeName == "boolean") {
+    const bool nullable = typeName == "java.lang.Boolean" || boxed;
+    return [nullable](Context* c, JNIEnv* env, const JSValueConst& v) {
       jvalue result;
-      if (!JS_IsBool(v)) {
-        result.l = nullptr;
+      result.l = nullptr;
+      if (JS_IsException(v)) {
+        c->throwJsException(env, v);
+      } else if (nullable && (JS_IsNull(v) || JS_IsUndefined(v))) {
+        // Leave as null.
+      } else if (!JS_IsBool(v)) {
         throwJavaException(env, "java/lang/IllegalArgumentException",
                            "Cannot convert value %s to boolean",
                            describeValue(c->jsContext, v).c_str());
-      } else if (JS_IsException(v)) {
-        result.l = nullptr;
-        c->throwJsException(env, v);
       } else {
-        int r = JS_ToBool(c->jsContext, v);
-        if (r < 0) {
-          c->throwJsException(env, v);
+        result.z = static_cast<jboolean>(JS_VALUE_GET_BOOL(v) != 0);
+        if (nullable) {
+          result.l = env->CallStaticObjectMethodA(c->booleanClass, c->booleanValueOf, &result);
         }
-        result.z = r != 0;
       }
       return result;
     };

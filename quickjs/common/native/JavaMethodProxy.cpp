@@ -20,31 +20,40 @@
 #include "ExceptionThrowers.h"
 
 JavaMethodProxy::JavaMethodProxy(Context* context, JNIEnv* env, jobject method)
-    : name(getName(env, method)) {
+    : name(getName(env, method)), isVarArgs(false) {
   auto methodId = env->FromReflectedMethod(method);
   jclass methodClass = env->GetObjectClass(method);
 
-  const jmethodID isVarArgsMethod = env->GetMethodID(methodClass, "isVarArgs", "()Z");
-  isVarArgs = env->CallBooleanMethod(method, isVarArgsMethod);
+  const jmethodID isVarArgsMethod =
+      env->ExceptionCheck() ? nullptr : env->GetMethodID(methodClass, "isVarArgs", "()Z");
+  if (isVarArgsMethod) {
+    isVarArgs = env->CallBooleanMethod(method, isVarArgsMethod);
+  }
 
-  const jmethodID getParameterTypes = env->GetMethodID(methodClass, "getParameterTypes",
-                                                       "()[Ljava/lang/Class;");
-  jobjectArray parameterTypes =
-      static_cast<jobjectArray>(env->CallObjectMethod(method, getParameterTypes));
-  const jsize numArgs = env->GetArrayLength(parameterTypes);
-  for (jsize i = 0; i < numArgs && !env->ExceptionCheck(); ++i) {
-    auto parameterType = env->GetObjectArrayElement(parameterTypes, i);
-    argumentLoaders.push_back(
-        context->getJsToJavaConverter(env, static_cast<jclass>(parameterType), false));
-    env->DeleteLocalRef(parameterType);
+  const jmethodID getParameterTypes = env->ExceptionCheck()
+      ? nullptr
+      : env->GetMethodID(methodClass, "getParameterTypes", "()[Ljava/lang/Class;");
+  jobjectArray parameterTypes = getParameterTypes
+      ? static_cast<jobjectArray>(env->CallObjectMethod(method, getParameterTypes))
+      : nullptr;
+  if (parameterTypes && !env->ExceptionCheck()) {
+    const jsize numArgs = env->GetArrayLength(parameterTypes);
+    for (jsize i = 0; i < numArgs && !env->ExceptionCheck(); ++i) {
+      auto parameterType = env->GetObjectArrayElement(parameterTypes, i);
+      if (!parameterType) break;
+      argumentLoaders.push_back(
+          context->getJsToJavaConverter(env, static_cast<jclass>(parameterType), false));
+      env->DeleteLocalRef(parameterType);
+    }
   }
 
   if (!env->ExceptionCheck()) {
     const jmethodID getReturnType =
         env->GetMethodID(methodClass, "getReturnType", "()Ljava/lang/Class;");
-    auto returnTypeObject = env->CallObjectMethod(method, getReturnType);
-    auto resultLoader =
-        context->getJavaToJsConverter(env, static_cast<jclass>(returnTypeObject), false);
+    auto returnTypeObject = getReturnType ? env->CallObjectMethod(method, getReturnType) : nullptr;
+    auto resultLoader = env->ExceptionCheck()
+        ? Context::JavaToJavaScript()
+        : context->getJavaToJsConverter(env, static_cast<jclass>(returnTypeObject), false);
 
     if (!env->ExceptionCheck()) {
       auto returnTypeName = getName(env, returnTypeObject);
@@ -131,7 +140,9 @@ JavaMethodProxy::invoke(Context* context, jobject javaThis, int argc, JSValueCon
   }
 
   auto env = context->getEnv();
-  env->PushLocalFrame(argc + 1);
+  if (env->PushLocalFrame(argc + 1) < 0) {
+    return context->throwJavaExceptionFromJs(env);
+  }
   jvalue args[argumentLoaders.size()];
   for (int i = 0; i < minArgs; i++) {
     args[i] = argumentLoaders[i](context, env, argv[i]);

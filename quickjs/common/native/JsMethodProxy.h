@@ -35,6 +35,8 @@ public:
 private:
   std::vector<std::function<JSValueConst(Context*, JNIEnv*, jvalue)>> argumentLoaders;
   std::function<jvalue(Context*, JNIEnv*, const JSValueConst&)> resultLoader;
+  // Set for int, double and boolean: JavaScript must not return null or undefined.
+  std::string primitiveReturnType;
   bool isVarArgs;
 };
 

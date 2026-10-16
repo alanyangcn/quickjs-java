@@ -32,6 +32,10 @@ public:
   Context(JNIEnv *env);
   ~Context();
 
+  // Looks up the Java classes and methods used by the bridge. Returns false on failure, possibly
+  // with a pending Java exception. The destructor handles partially initialized instances.
+  bool initialize(JNIEnv *env);
+
   JsObjectProxy* getObjectProxy(JNIEnv*, jstring name, jobjectArray methods);
   void setObjectProxy(JNIEnv*, jstring name, jobject object, jobjectArray methods);
   jobject eval(JNIEnv*, jstring source, jstring file);
@@ -42,7 +46,11 @@ public:
   typedef std::function<jvalue(Context*, JNIEnv*, JSValueConst)> JavaScriptToJava;
   JavaScriptToJava getJsToJavaConverter(JNIEnv*, jclass type, bool boxed);
 
+  // Converts `value` to a Java object. Values with no Java representation, at any depth, throw
+  // if `throwOnUnsupportedType` is true and become null otherwise.
   jobject toJavaObject(JNIEnv*, const JSValue& value, bool throwOnUnsupportedType = true);
+  // Reads the length of an array-like value. On failure throws a Java exception, returns false.
+  bool getArrayLength(JNIEnv*, const JSValueConst& value, jsize* length) const;
   void throwJsException(JNIEnv*, const JSValue& value) const;
   JSValue throwJavaExceptionFromJs(JNIEnv*) const;
 
@@ -80,11 +88,15 @@ public:
   std::vector<JsObjectProxy*> objectProxies;
   std::unordered_map<std::string, jclass> globalReferences;
 
+  // Largest array, and most array elements in one conversion, passed between JavaScript and Java.
+  static const jsize MAX_ARRAY_LENGTH = 1 << 22;
   // Arrays currently being converted by toJavaObject(), used to detect cycles.
   static const size_t MAX_ARRAY_NESTING_DEPTH = 256;
   std::vector<void*> arraysBeingConverted;
+  size_t arrayElementsConverted = 0;
 };
 
 std::string getName(JNIEnv* env, jobject javaClass);
+std::string describeValue(JSContext* jsContext, JSValueConst value);
 
 #endif //QUICKJS_ANDROID_CONTEXT_H

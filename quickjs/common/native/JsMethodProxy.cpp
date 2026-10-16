@@ -17,33 +17,51 @@
 #include "JsMethodProxy.h"
 #include <algorithm>
 #include "Context.h"
+#include "ExceptionThrowers.h"
 
 JsMethodProxy::JsMethodProxy(Context* context, JNIEnv* env, const char* name, jobject method)
-    : name(name), methodId(env->FromReflectedMethod(method)) {
+    : name(name), methodId(env->FromReflectedMethod(method)), isVarArgs(false) {
   const jclass methodClass = env->GetObjectClass(method);
 
   const jmethodID getReturnType =
       env->GetMethodID(methodClass, "getReturnType", "()Ljava/lang/Class;");
-  const auto returnedClass = static_cast<jclass>(env->CallObjectMethod(method, getReturnType));
-  resultLoader = context->getJsToJavaConverter(env, returnedClass, true);
-  env->DeleteLocalRef(returnedClass);
+  const auto returnedClass = getReturnType
+      ? static_cast<jclass>(env->CallObjectMethod(method, getReturnType))
+      : nullptr;
   if (!env->ExceptionCheck()) {
-    const jmethodID isVarArgsMethod = env->GetMethodID(methodClass, "isVarArgs", "()Z");
-    isVarArgs = env->CallBooleanMethod(method, isVarArgsMethod);
+    resultLoader = context->getJsToJavaConverter(env, returnedClass, true);
+  }
+  if (!env->ExceptionCheck()) {
+    const auto returnTypeName = getName(env, returnedClass);
+    if (returnTypeName == "int" || returnTypeName == "double" || returnTypeName == "boolean") {
+      primitiveReturnType = returnTypeName;
+    }
+  }
+  env->DeleteLocalRef(returnedClass);
 
-    const jmethodID getParameterTypes =
-        env->GetMethodID(methodClass, "getParameterTypes", "()[Ljava/lang/Class;");
-    jobjectArray parameterTypes =
-        static_cast<jobjectArray>(env->CallObjectMethod(method, getParameterTypes));
+  const jmethodID isVarArgsMethod =
+      env->ExceptionCheck() ? nullptr : env->GetMethodID(methodClass, "isVarArgs", "()Z");
+  if (isVarArgsMethod) {
+    isVarArgs = env->CallBooleanMethod(method, isVarArgsMethod);
+  }
+
+  const jmethodID getParameterTypes = env->ExceptionCheck()
+      ? nullptr
+      : env->GetMethodID(methodClass, "getParameterTypes", "()[Ljava/lang/Class;");
+  jobjectArray parameterTypes = getParameterTypes
+      ? static_cast<jobjectArray>(env->CallObjectMethod(method, getParameterTypes))
+      : nullptr;
+  if (parameterTypes && !env->ExceptionCheck()) {
     const jsize numArgs = env->GetArrayLength(parameterTypes);
     for (jsize i = 0; i < numArgs && !env->ExceptionCheck(); ++i) {
       auto parameterType = env->GetObjectArrayElement(parameterTypes, i);
+      if (!parameterType) break;
       argumentLoaders.push_back(
           context->getJavaToJsConverter(env, static_cast<jclass>(parameterType), true));
       env->DeleteLocalRef(parameterType);
     }
-    env->DeleteLocalRef(parameterTypes);
   }
+  env->DeleteLocalRef(parameterTypes);
   env->DeleteLocalRef(methodClass);
 }
 
@@ -64,11 +82,12 @@ jobject JsMethodProxy::call(Context* context, JNIEnv* env, JSValue thisPointer, 
     } else if (!isVarArgs || numArgs < totalArgs - 1) {
       arguments.push_back(value);
     } else if (JS_IsArray(context->jsContext, value)) {
-      auto len = JS_GetPropertyStr(context->jsContext, value, "length");
-      for (int i = 0, e = JS_VALUE_GET_INT(len); i < e; i++) {
-        arguments.push_back(JS_GetPropertyUint32(context->jsContext, value, i));
+      jsize length = 0;
+      if (context->getArrayLength(env, value, &length)) {
+        for (jsize i = 0; i < length; i++) {
+          arguments.push_back(JS_GetPropertyUint32(context->jsContext, value, i));
+        }
       }
-      JS_FreeValue(context->jsContext, len);
       JS_FreeValue(context->jsContext, value);
     } else {
       arguments.push_back(value);
@@ -86,6 +105,13 @@ jobject JsMethodProxy::call(Context* context, JNIEnv* env, JSValue thisPointer, 
                                    arguments.data());
     JS_FreeAtom(context->jsContext, property);
     result = resultLoader(context, env, callResult).l;
+    if (!result && !env->ExceptionCheck() && !primitiveReturnType.empty()) {
+      // The Java proxy would otherwise fail to unbox null with an unrelated NullPointerException.
+      throwJavaException(env, "java/lang/IllegalArgumentException",
+                         "Cannot convert value %s to %s",
+                         describeValue(context->jsContext, callResult).c_str(),
+                         primitiveReturnType.c_str());
+    }
     JS_FreeValue(context->jsContext, callResult);
   } else {
     result = nullptr;

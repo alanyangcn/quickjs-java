@@ -395,6 +395,15 @@ public final class QuickJsSetTest {
     // The state of our QuickJs context is still valid, containing what was there before.
     assertThat(quickJs.evaluate("value.getValue();")).isEqualTo("8675309");
     assertThat(quickJs.evaluate("localVar.toString();")).isEqualTo("42");
+
+    // The failed object was not published, so the name can be used again.
+    assertThat(quickJs.evaluate("typeof illegal")).isEqualTo("undefined");
+    quickJs.set("illegal", TestInterface.class, new TestInterface() {
+      @Override public String getValue() {
+        return "legal";
+      }
+    });
+    assertThat(quickJs.evaluate("illegal.getValue();")).isEqualTo("legal");
   }
 
   interface TestMultipleObjectArgs {

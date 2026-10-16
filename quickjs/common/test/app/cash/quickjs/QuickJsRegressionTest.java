@@ -351,6 +351,233 @@ public final class QuickJsRegressionTest {
     }
   }
 
+  // R06: array lengths are read as indexes and bounded.
+
+  interface DoubleArraySource {
+    double[] get();
+  }
+
+  @Test public void sparseArrayLongerThanIntThrows() {
+    try {
+      quickjs.evaluate("var a = []; a.length = Math.pow(2, 31); a");
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat().isEqualTo(
+          "Cannot marshal a JavaScript array of length 2147483648 to Java (limit 4194304)");
+    }
+  }
+
+  @Test public void arrayLikeLengthIsValidated() {
+    quickjs.evaluate("var source = { value: null, get: function() { return this.value; } };");
+    DoubleArraySource source = quickjs.get("source", DoubleArraySource.class);
+
+    quickjs.evaluate("source.value = { length: 4194305 };");
+    try {
+      source.get();
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat().isEqualTo(
+          "Cannot marshal a JavaScript array of length 4194305 to Java (limit 4194304)");
+    }
+
+    quickjs.evaluate("source.value = { length: -1 };");
+    try {
+      source.get();
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e).hasMessageThat().isEqualTo("invalid array index");
+    }
+
+    quickjs.evaluate("source.value = { length: 2, 0: 1.5, 1: 2.5 };");
+    assertThat(source.get()).usingExactEquality().containsExactly(1.5, 2.5).inOrder();
+  }
+
+  @Test public void totalArrayElementsAreBounded() {
+    // Shared sub-arrays are converted once per reference, so 2048 references to one array of 2048
+    // elements is more than 4194304 elements in total.
+    try {
+      quickjs.evaluate("var x = new Array(2048).fill(1); new Array(2048).fill(x)");
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat()
+          .isEqualTo("Cannot marshal more than 4194304 JavaScript array elements to Java");
+    }
+    Object[] result = (Object[]) quickjs.evaluate(
+        "var x = new Array(2048).fill(1); new Array(2047).fill(x)");
+    assertThat(result).hasLength(2047);
+  }
+
+  // R08: exceptions thrown by getters are reported as they are.
+
+  interface Greeters {
+    String greet();
+  }
+
+  @Test public void getReportsGetterException() {
+    quickjs.evaluate("var g = { get greet() { throw new Error('getter failed'); } };");
+    try {
+      quickjs.get("g", Greeters.class);
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e).hasMessageThat().isEqualTo("getter failed");
+    }
+    assertThat(quickjs.evaluate("1 + 1")).isEqualTo(2);
+  }
+
+  @Test public void callReportsGlobalGetterException() {
+    quickjs.evaluate(""
+        + "var broken = false;\n"
+        + "Object.defineProperty(globalThis, 'g', {\n"
+        + "  get: function() {\n"
+        + "    if (broken) throw new Error('global getter failed');\n"
+        + "    return { greet: function() { return 'hi'; } };\n"
+        + "  }\n"
+        + "});");
+    Greeters greeter = quickjs.get("g", Greeters.class);
+    assertThat(greeter.greet()).isEqualTo("hi");
+
+    quickjs.evaluate("broken = true;");
+    try {
+      greeter.greet();
+      fail();
+    } catch (QuickJsException e) {
+      assertThat(e).hasMessageThat().isEqualTo("global getter failed");
+    }
+
+    quickjs.evaluate("broken = false;");
+    assertThat(greeter.greet()).isEqualTo("hi");
+  }
+
+  // R09: numbers and booleans convert by the same strict rules everywhere.
+
+  interface BoxedResults {
+    Integer integer();
+    Double number();
+    Boolean bool();
+    int primitiveInt();
+    double primitiveDouble();
+    boolean primitiveBoolean();
+  }
+
+  @Test public void boxedReturnValuesAreStrict() {
+    quickjs.evaluate("var r = {\n"
+        + "  value: null,\n"
+        + "  integer: function() { return this.value; },\n"
+        + "  number: function() { return this.value; },\n"
+        + "  bool: function() { return this.value; },\n"
+        + "  primitiveInt: function() { return this.value; },\n"
+        + "  primitiveDouble: function() { return this.value; },\n"
+        + "  primitiveBoolean: function() { return this.value; }\n"
+        + "};");
+    BoxedResults results = quickjs.get("r", BoxedResults.class);
+
+    assertThat(results.integer()).isNull();
+    assertThat(results.number()).isNull();
+    assertThat(results.bool()).isNull();
+
+    quickjs.evaluate("r.value = 'abc';");
+    assertConversionFails("Cannot convert value abc to int", results::integer);
+    assertConversionFails("Cannot convert value abc to double", results::number);
+    assertConversionFails("Cannot convert value abc to boolean", results::bool);
+
+    quickjs.evaluate("r.value = 1;");
+    assertThat(results.integer()).isEqualTo(1);
+    assertThat(results.number()).isEqualTo(1.0);
+    assertConversionFails("Cannot convert value 1 to boolean", results::bool);
+
+    quickjs.evaluate("r.value = 1.5;");
+    assertConversionFails("Cannot convert value 1.5 to int", results::integer);
+    assertThat(results.number()).isEqualTo(1.5);
+  }
+
+  @Test public void primitiveReturnValuesRejectNull() {
+    quickjs.evaluate("var r = {\n"
+        + "  value: undefined,\n"
+        + "  integer: function() { return this.value; },\n"
+        + "  number: function() { return this.value; },\n"
+        + "  bool: function() { return this.value; },\n"
+        + "  primitiveInt: function() { return this.value; },\n"
+        + "  primitiveDouble: function() { return this.value; },\n"
+        + "  primitiveBoolean: function() { return this.value; }\n"
+        + "};");
+    final BoxedResults results = quickjs.get("r", BoxedResults.class);
+
+    assertConversionFails("Cannot convert value undefined to int", results::primitiveInt);
+    assertConversionFails("Cannot convert value undefined to double", results::primitiveDouble);
+    assertConversionFails("Cannot convert value undefined to boolean", results::primitiveBoolean);
+
+    quickjs.evaluate("r.value = null;");
+    assertConversionFails("Cannot convert value null to int", results::primitiveInt);
+
+    quickjs.evaluate("r.value = true;");
+    assertThat(results.primitiveBoolean()).isTrue();
+  }
+
+  interface IntConsumer {
+    int accept(int value);
+  }
+
+  @Test public void intArgumentsAcceptExactIntegers() {
+    quickjs.set("c", IntConsumer.class, new IntConsumer() {
+      @Override public int accept(int value) {
+        return value;
+      }
+    });
+    assertThat(quickjs.evaluate("c.accept(-0)")).isEqualTo(0);
+    assertThat(quickjs.evaluate("c.accept(0.5 + 0.5)")).isEqualTo(1);
+    assertThat(quickjs.evaluate("c.accept(2147483647)")).isEqualTo(2147483647);
+    assertThat(quickjs.evaluate("c.accept(-2147483648)")).isEqualTo(-2147483648);
+
+    assertEvaluateFails("Cannot convert value 1.5 to int", "c.accept(1.5)");
+    assertEvaluateFails("Cannot convert value NaN to int", "c.accept(NaN)");
+    assertEvaluateFails("Cannot convert value 2147483648 to int", "c.accept(2147483648)");
+    assertEvaluateFails("Cannot convert value 1 to int", "c.accept('1')");
+  }
+
+  interface BoxedConsumer {
+    Object accept(Integer i, Boolean b);
+  }
+
+  @Test public void boxedArgumentsAreStrict() {
+    quickjs.set("c", BoxedConsumer.class, new BoxedConsumer() {
+      @Override public Object accept(Integer i, Boolean b) {
+        return i + ":" + b;
+      }
+    });
+    assertThat(quickjs.evaluate("c.accept(-0, true)")).isEqualTo("0:true");
+    assertThat(quickjs.evaluate("c.accept(null, undefined)")).isEqualTo("null:null");
+    assertEvaluateFails("Cannot convert value abc to int", "c.accept('abc', true)");
+    assertEvaluateFails("Cannot convert value 1 to boolean", "c.accept(1, 1)");
+  }
+
+  // R10: evaluate() turns unsupported values into null at any depth.
+
+  @Test public void evaluateUnsupportedValuesBecomeNull() {
+    assertThat(quickjs.evaluate("({})")).isNull();
+    assertThat((Object[]) quickjs.evaluate("[{}]")).asList().containsExactly((Object) null);
+    Object[] result = (Object[]) quickjs.evaluate("[1, function() {}, [{}, 'a']]");
+    assertThat(result[0]).isEqualTo(1);
+    assertThat(result[1]).isNull();
+    assertThat((Object[]) result[2]).asList().containsExactly(null, "a").inOrder();
+  }
+
+  private static void assertConversionFails(String message, Runnable runnable) {
+    try {
+      runnable.run();
+      fail();
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessageThat().isEqualTo(message);
+    }
+  }
+
+  private void assertEvaluateFails(final String message, final String script) {
+    assertConversionFails(message, new Runnable() {
+      @Override public void run() {
+        quickjs.evaluate(script);
+      }
+    });
+  }
+
   private static void assertNullPointerException(String message, Runnable runnable) {
     try {
       runnable.run();

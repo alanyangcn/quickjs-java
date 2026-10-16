@@ -22,7 +22,7 @@
 extern "C" JNIEXPORT jlong JNICALL
 Java_app_cash_quickjs_QuickJs_createContext(JNIEnv* env, jclass type) {
   Context* c = new(std::nothrow) Context(env);
-  if (!c || !c->jsContext || !c->jsRuntime) {
+  if (!c || !c->initialize(env)) {
     delete c;
     c = nullptr;
   }

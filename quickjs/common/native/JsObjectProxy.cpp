@@ -32,6 +32,12 @@ JsObjectProxy::~JsObjectProxy() {
 jobject JsObjectProxy::call(Context *context, JNIEnv* env, jobject method, jobjectArray args) const {
   JSValue global = JS_GetGlobalObject(context->jsContext);
   JSValue thisPointer = JS_GetPropertyStr(context->jsContext, global, name.c_str());
+  if (JS_IsException(thisPointer)) {
+    // Report the getter's exception rather than failing later on an undefined receiver.
+    context->throwJsException(env, thisPointer);
+    JS_FreeValue(context->jsContext, global);
+    return nullptr;
+  }
 
   const JsMethodProxy *methodProxy = nullptr;
   for (auto m : methods) {
