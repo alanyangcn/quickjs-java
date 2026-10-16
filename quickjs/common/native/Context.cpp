@@ -258,8 +258,11 @@ jobject Context::execute(JNIEnv* env, jbyteArray byteCode) {
   if (!buffer.empty()) {
     env->GetByteArrayRegion(byteCode, 0, buffer.size(), reinterpret_cast<jbyte*>(buffer.data()));
   }
+  // data() may be null for an empty vector, and QuickJS does pointer arithmetic on it.
+  static const uint8_t empty = 0;
+  const uint8_t* data = buffer.empty() ? &empty : buffer.data();
   const auto flags = JS_READ_OBJ_BYTECODE | JS_READ_OBJ_REFERENCE;
-  ScopedJSValue obj(jsContext, JS_ReadObject(jsContext, buffer.data(), buffer.size(), flags));
+  ScopedJSValue obj(jsContext, JS_ReadObject(jsContext, data, buffer.size(), flags));
   if (JS_IsException(obj.get())) {
     throwJsException(env, obj.get());
     return nullptr;
